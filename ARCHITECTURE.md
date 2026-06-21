@@ -4,10 +4,74 @@
 
 EdgeLocate is a VLM for open-vocabulary object detection. Given an image and a text prompt, it autoregressively generates bounding box coordinates as discrete tokens.
 
+```mermaid
+flowchart LR
+    subgraph Inputs
+        I[Image: 224 x 224 x 3] --> VE[SigLIP-Base-Patch16-224<br/>92.88M params, frozen]
+        T[Text Prompt] --> Tokenizer[Qwen2.5 Tokenizer<br/>vocab: 151644 base tokens]
+        Tokenizer --> Emb[Token Embeddings<br/>seq_len x 896]
+    end
+
+    subgraph Vision Pipeline
+        VE --> VP[196 patch features<br/>each 768-d]
+        VP --> Proj[MLP Projector<br/>1.49M params, trainable<br/>Linear 768-896 + GELU + Linear 896-896]
+    end
+
+    Proj --> Merge{Merge at lpipeimagepipe token<br/>replace 1 embed with 196 visual tokens}
+
+    subgraph LLM Backbone
+        direction TB
+        Merge --> LLM[Qwen2.5-0.5B-Instruct<br/>494.03M base params<br/>LoRA r=64-128: +35M trainable<br/>target: q k v o gate up down proj]
+        LLM --> Attn[Self-Attention x24 layers<br/>with LoRA adapters]
+        Attn --> FFN[FFN x24 layers<br/>gate/up/down with LoRA]
+        FFN --> HS[Hidden States<br/>merged_seq_len x 896]
+    end
+
+    HS --> LMH[LM Head<br/>152669 x 896, untrained, trainable<br/>no weight tying]
+
+    subgraph Outputs
+        LMH --> Tokens[Logits: 152669 classes<br/>argmax -> token IDs]
+        Tokens --> Detok[Detokenize to text]
+        Detok --> Parse[Regex parse:<br/>box(d+)(d+)(d+)(d+)/box]
+        Parse --> Boxes[Bounding Boxes<br/>x1 y1 x2 y2 in 0-1000<br/>divide by 1000 for normalized coords]
+    end
 ```
-Image ──► SigLIP ──► Projector ──┐
-                                  ├──► LLM+LoRA ──► LM Head ──► token ids
-Text ──► Embedding ──────────────┘
+
+```mermaid
+flowchart TB
+    subgraph Training Step
+        direction TB
+        A[Image: 224x224x3] --> B[SigLIP forward: 196x768]
+        B --> C[MLP Projector: 196x768 to 196x896]
+        C --> D[input_ids: tokenized conversation]
+        D --> E[Locate image token lpipeimagepipe at pos k]
+        E --> F[Slice embeddings: emb0:k-1, visual, embk+1:]
+        F --> G[Merged seq len: T + 195<br/>each position: 896-d]
+        G --> H[Expand labels: insert -100 for<br/>196 visual positions]
+        H --> I[LLM+LoRA forward on merged embeds]
+        I --> J[Logits: merged_seq_len x 152669]
+        J --> K[Cross-entropy loss with shifted labels<br/>ignoring -100 positions]
+        K --> L[Backprop through LM head, LoRA,<br/>projector (VE frozen)]
+        L --> M[Update: LoRA adapters, LM head,<br/>embed_tokens, projector weights]
+    end
+
+    subgraph Inference Step
+        direction TB
+        N[Image: 224x224x3] --> O[SigLIP + Projector: 196x896]
+        P[Text prompt] --> Q[Tokenize + apply_chat_template]
+        Q --> R[input_ids with lpipeimagepipe token]
+        O --> S[Merge: text embeds + visual embeds]
+        R --> S
+        S --> T[llm.generate with inputs_embeds]
+        T --> U[KV cache accumulates full context]
+        U --> V[Greedy sampling by default<br/>temperature=0]
+        V --> W[Stop at lpipeim_endpipe or max_new_tokens]
+        W --> X[Decode token IDs to text]
+        X --> Y[Regex find all box(d+)(d+)(d+)(d+)/box]
+        Y --> Z[Convert each group of 4 digits to<br/>x1 y1 x2 y2 ints in 0-1000]
+    end
+
+    Training Step -.-> |same VE + projector|Inference Step
 ```
 
 ## Components
