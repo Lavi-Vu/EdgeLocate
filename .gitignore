@@ -1,0 +1,16 @@
+*.png
+*.jpg
+*.jpeg
+*.json
+*.jsonl
+*.log
+*.pyc
+*.bin
+*.lock
+*.pt
+*.pth
+*.safetensors
+*.ckpt
+*.jinja
+output*/
+test_*/
