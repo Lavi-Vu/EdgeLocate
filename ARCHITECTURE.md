@@ -5,75 +5,125 @@
 EdgeLocate is a VLM for open-vocabulary object detection. Given an image and a text prompt, it autoregressively generates bounding box coordinates as discrete tokens.
 
 ```mermaid
-flowchart LR
-    subgraph Inputs
-        I[Image: 224 x 224 x 3] --> VE[SigLIP-Base-Patch16-224<br/>92.88M params, frozen]
-        T[Text Prompt] --> Tokenizer[Qwen2.5 Tokenizer<br/>vocab: 151644 base tokens]
-        Tokenizer --> Emb[Token Embeddings<br/>seq_len x 896]
+flowchart TB
+
+    subgraph Vision Encoder
+        IMG["Image
+224x224"]
+        SIG["SigLIP Base"]
+        FEAT["196 x 768 Features"]
+
+        IMG --> SIG --> FEAT
     end
 
-    subgraph Vision Pipeline
-        VE --> VP[196 patch features<br/>each 768-d]
-        VP --> Proj[MLP Projector<br/>1.49M params, trainable<br/>Linear 768-896 + GELU + Linear 896-896]
+    subgraph Vision Language Bridge
+        PROJ["MLP Projector
+768 -> 896"]
+        VT["196 Visual Tokens
+196 x 896"]
+
+        FEAT --> PROJ --> VT
     end
 
-    Proj --> Merge{Merge at lpipeimagepipe token<br/>replace 1 embed with 196 visual tokens}
+    subgraph Text Encoder
+        TXT["Text Prompt"]
+        TOK["Tokenizer"]
+        EMB["Text Embeddings"]
 
-    subgraph LLM Backbone
-        direction TB
-        Merge --> LLM[Qwen2.5-0.5B-Instruct<br/>494.03M base params<br/>LoRA r=64-128: +35M trainable<br/>target: q k v o gate up down proj]
-        LLM --> Attn[Self-Attention x24 layers<br/>with LoRA adapters]
-        Attn --> FFN[FFN x24 layers<br/>gate/up/down with LoRA]
-        FFN --> HS[Hidden States<br/>merged_seq_len x 896]
+        TXT --> TOK --> EMB
     end
 
-    HS --> LMH[LM Head<br/>152669 x 896, untrained, trainable<br/>no weight tying]
+    subgraph Multimodal LLM
+        MERGE["Token Fusion"]
 
-    subgraph Outputs
-        LMH --> Tokens[Logits: 152669 classes<br/>argmax -> token IDs]
-        Tokens --> Detok[Detokenize to text]
-        Detok --> Parse[Regex parse:<br/>box(d+)(d+)(d+)(d+)/box]
-        Parse --> Boxes[Bounding Boxes<br/>x1 y1 x2 y2 in 0-1000<br/>divide by 1000 for normalized coords]
+        QWEN["Qwen2.5 0.5B
+with LoRA"]
+
+        HIDDEN["Hidden States"]
+
+        EMB --> MERGE
+        VT --> MERGE
+
+        MERGE --> QWEN
+        QWEN --> HIDDEN
+    end
+
+    subgraph Decoder
+        LMH["LM Head"]
+
+        TOKENS["Generated Tokens"]
+
+        BOX["Bounding Boxes"]
+
+        HIDDEN --> LMH
+        LMH --> TOKENS
+        TOKENS --> BOX
     end
 ```
-
 ```mermaid
 flowchart TB
-    subgraph Training Step
-        direction TB
-        A[Image: 224x224x3] --> B[SigLIP forward: 196x768]
-        B --> C[MLP Projector: 196x768 to 196x896]
-        C --> D[input_ids: tokenized conversation]
-        D --> E[Locate image token lpipeimagepipe at pos k]
-        E --> F[Slice embeddings: emb0:k-1, visual, embk+1:]
-        F --> G[Merged seq len: T + 195<br/>each position: 896-d]
-        G --> H[Expand labels: insert -100 for<br/>196 visual positions]
-        H --> I[LLM+LoRA forward on merged embeds]
-        I --> J[Logits: merged_seq_len x 152669]
-        J --> K[Cross-entropy loss with shifted labels<br/>ignoring -100 positions]
-        K --> L[Backprop through LM head, LoRA,<br/>projector (VE frozen)]
-        L --> M[Update: LoRA adapters, LM head,<br/>embed_tokens, projector weights]
-    end
 
-    subgraph Inference Step
-        direction TB
-        N[Image: 224x224x3] --> O[SigLIP + Projector: 196x896]
-        P[Text prompt] --> Q[Tokenize + apply_chat_template]
-        Q --> R[input_ids with lpipeimagepipe token]
-        O --> S[Merge: text embeds + visual embeds]
-        R --> S
-        S --> T[llm.generate with inputs_embeds]
-        T --> U[KV cache accumulates full context]
-        U --> V[Greedy sampling by default<br/>temperature=0]
-        V --> W[Stop at lpipeim_endpipe or max_new_tokens]
-        W --> X[Decode token IDs to text]
-        X --> Y[Regex find all box(d+)(d+)(d+)(d+)/box]
-        Y --> Z[Convert each group of 4 digits to<br/>x1 y1 x2 y2 ints in 0-1000]
-    end
+    IMG["Input Image
+224x224x3"]
 
-    Training Step -.-> |same VE + projector|Inference Step
+    SIGLIP["SigLIP Base Patch16 224
+92.88M Params
+Frozen"]
+
+    PATCH["196 Visual Features
+196 x 768"]
+
+    PROJ["MLP Projector
+768 -> 896
+1.49M Trainable Params"]
+
+    TXT["Text Prompt"]
+
+    TOK["Qwen2.5 Tokenizer"]
+
+    EMB["Text Embeddings
+T x 896"]
+
+    MERGE["Replace Image Token
+with 196 Visual Tokens"]
+
+    LLM["Qwen2.5 0.5B Instruct
+494M Base Params
+
+LoRA Adapters
+35M Trainable Params"]
+
+    HS["Hidden States
+MergedSeq x 896"]
+
+    LMH["LM Head
+152669 x 896
+Trainable"]
+
+    OUT["Generated Tokens"]
+
+    PARSE["Parse Box Tokens"]
+
+    BOX["Bounding Boxes
+x1 y1 x2 y2"]
+
+    IMG --> SIGLIP
+    SIGLIP --> PATCH
+    PATCH --> PROJ
+
+    TXT --> TOK
+    TOK --> EMB
+
+    PROJ --> MERGE
+    EMB --> MERGE
+
+    MERGE --> LLM
+    LLM --> HS
+    HS --> LMH
+    LMH --> OUT
+    OUT --> PARSE
+    PARSE --> BOX
 ```
-
 ## Components
 
 ### Vision Encoder (SigLIP-Base-Patch16-224)
