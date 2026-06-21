@@ -174,7 +174,7 @@ def parse_args() -> Tuple[ModelConfig, TrainingConfig, DataConfig, InferenceConf
     parser.add_argument("--max_boxes_per_image", type=int, default=8, help="Max boxes per image for create_sample")
 
     # Action mode
-    parser.add_argument("--action", default="train", choices=["train", "inference", "eval", "create_sample"],
+    parser.add_argument("--action", default="train", choices=["train", "inference", "eval", "create_sample", "prepare_refcoco", "prepare_coco"],
                         help="Action to perform")
 
     args = parser.parse_args()
