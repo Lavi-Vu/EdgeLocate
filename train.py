@@ -28,6 +28,8 @@ from locany import (
     DetectionInferenceEngine,
     evaluate_model,
     create_sample_dataset,
+    prepare_refcoco,
+    prepare_coco,
     set_seed,
     get_model_size,
     load_image,
@@ -252,6 +254,16 @@ def main():
             output_path=data_cfg.train_data_path or "./sample_data.jsonl",
             num_samples=extra_args.get("num_samples", 100),
             max_boxes_per_image=extra_args.get("max_boxes_per_image", 8),
+        )
+    elif action == "prepare_refcoco":
+        prepare_refcoco(
+            coco_root=data_cfg.image_dir or "./data/coco",
+            output_dir=train_cfg.output_dir,
+        )
+    elif action == "prepare_coco":
+        prepare_coco(
+            coco_root=data_cfg.image_dir or "./data/coco",
+            output_dir=train_cfg.output_dir,
         )
     else:
         logger.error(f"Unknown action: {action}")

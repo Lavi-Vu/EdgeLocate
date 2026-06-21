@@ -6,6 +6,8 @@ from .inference import DetectionInferenceEngine, visualize_boxes
 from .eval import compute_iou, compute_precision_recall, evaluate_model
 from .utils import set_seed, ensure_dir, get_model_size, load_image, SPECIAL_TOKENS, LOCANY_SPECIAL_TOKENS, COORD_TOKENS, boxes_to_tokens, parse_boxes_from_text
 from .create_sample_data import create_sample_dataset
+from .prepare_refcoco import prepare as prepare_refcoco
+from .prepare_coco import prepare as prepare_coco
 
 __all__ = [
     "ModelConfig",
@@ -34,4 +36,6 @@ __all__ = [
     "boxes_to_tokens",
     "parse_boxes_from_text",
     "create_sample_dataset",
+    "prepare_refcoco",
+    "prepare_coco",
 ]

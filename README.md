@@ -63,6 +63,44 @@ python infer.py \
   --prompt "Detect all objects."
 ```
 
+### COCO Detection
+```bash
+# Prepare dataset (downloads COCO 2017 train+val)
+python train.py --action prepare_coco \
+  --image_dir ./data/coco \
+  --output_dir ./data/coco_detection \
+  --max_train 50000 --max_val 1000
+
+# Train on COCO detection (50k images, multiple objects per image)
+python train.py --action train \
+  --train_data_path ./data/coco_detection/train.jsonl \
+  --image_dir ./data/coco/train2017 \
+  --output_dir ./outputs_coco \
+  --num_epochs 5 \
+  --per_device_batch_size 1 \
+  --gradient_accumulation_steps 8 \
+  --learning_rate 3e-5 \
+  --lora_r 64
+```
+
+### RefCOCO+
+```bash
+# Prepare dataset (downloads COCO + refcoco+ annotations)
+python train.py --action prepare_refcoco \
+  --image_dir ./data/coco \
+  --output_dir ./data/refcoco_plus
+
+# Train on refcoco+ (referring expression comprehension)
+python train.py --action train \
+  --train_data_path ./data/refcoco_plus/train.jsonl \
+  --image_dir ./data/coco \
+  --output_dir ./outputs_refcoco \
+  --num_epochs 10 \
+  --per_device_batch_size 1 \
+  --learning_rate 5e-5 \
+  --lora_r 64
+```
+
 ### Inference (via `train.py`)
 ```bash
 python train.py --action inference \
