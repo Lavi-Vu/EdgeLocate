@@ -1,7 +1,7 @@
 """Prepare COCO detection dataset for EdgeLocate training in JSONL format.
 
-Each image becomes one sample: all object boxes are listed as
-<box><d1><d2><d3><d4></box> tokens in the assistant response.
+Each image becomes one sample: objects are listed with category labels
+as <ref>cat</ref><box><d><d><d><d></box> tokens in the GPT response.
 
 Usage:
     python -c "from locany.prepare_coco import prepare; prepare()"
@@ -18,7 +18,7 @@ from typing import Dict, List, Optional, Tuple
 
 from tqdm import tqdm
 
-from .utils import boxes_to_tokens, logger, SPECIAL_TOKENS
+from .utils import logger
 
 COCO_IMAGE_URLS = {
     "train2017": "http://images.cocodataset.org/zips/train2017.zip",
@@ -107,22 +107,6 @@ def build_category_map(ann_data: Dict) -> Dict[int, str]:
     return {cat["id"]: cat["name"] for cat in ann_data.get("categories", [])}
 
 
-def generate_prompts(num_prompts: int = 20) -> List[str]:
-    """Generate diverse detection prompts."""
-    base = [
-        "Detect all objects in this image.",
-        "Find all objects in this image.",
-        "Locate every object in this image.",
-        "List all objects with their bounding boxes.",
-        "Detect every visible object.",
-    ]
-    specific = [
-        f"Detect all {cat} in this image."
-        for cat in COCO_CATEGORIES[:15]
-    ]
-    return base + specific
-
-
 def convert_coco_to_jsonl(
     ann_path: str,
     coco_root: str,
@@ -132,23 +116,22 @@ def convert_coco_to_jsonl(
     max_boxes_per_image: int = 50,
     min_box_area: int = 400,
     max_images: Optional[int] = None,
-    prompt_template: str = "Detect all objects in this image.",
 ):
     """Convert COCO detection annotations to JSONL format.
 
-    Each sample: user prompt → assistant response with <box> tokens
-    for every object in the image (up to max_boxes_per_image).
+    Each sample:
+      human: "Locate all the instances that matches the following description: cat</c>person."
+      gpt:   "<ref>cat</ref><box><d><d><d><d></box><ref>person</ref><box><d><d><d><d></box>"
 
     Args:
         ann_path: Path to instances_{split}{year}.json
-        coco_root: Root dir containing COCO_{split} image dirs
+        coco_root: Root dir containing COCO image dirs (e.g. ./data/coco)
         output_path: Where to write JSONL
         split: train/val
         year: 2017 or 2014
         max_boxes_per_image: Cap on boxes per sample
         min_box_area: Minimum area to include a box
         max_images: Limit total images processed
-        prompt_template: Prompt to use (can include {categories})
     """
     logger.info(f"Loading COCO annotations from {ann_path}")
     with open(ann_path) as f:
@@ -156,12 +139,10 @@ def convert_coco_to_jsonl(
 
     cat_map = build_category_map(ann_data)
 
-    # Index annotations by image_id
     img_to_anns = defaultdict(list)
     for ann in ann_data.get("annotations", []):
         img_to_anns[ann["image_id"]].append(ann)
 
-    # Filter to split images if split field exists
     images = ann_data.get("images", [])
     if split == "train":
         images = [img for img in images if "val" not in img.get("file_name", "train")]
@@ -183,15 +164,19 @@ def convert_coco_to_jsonl(
             if not fname:
                 fname = f"{image_id:012d}.jpg"
 
-            img_path = os.path.join(coco_root, image_subdir, fname)
-            if not os.path.exists(img_path):
-                img_path = os.path.join(coco_root, fname)
-            if not os.path.exists(img_path):
+            abs_img_path = os.path.join(coco_root, image_subdir, fname)
+            if not os.path.exists(abs_img_path):
+                abs_img_path = os.path.join(coco_root, fname)
+            if not os.path.exists(abs_img_path):
                 skipped += 1
                 continue
 
             anns = img_to_anns.get(image_id, [])
-            boxes = []
+            img_w = img.get("width", 640)
+            img_h = img.get("height", 480)
+
+            boxes_with_cats = []
+            seen_cats = set()
             for ann in anns:
                 bbox = ann.get("bbox", [])
                 if len(bbox) < 4:
@@ -199,8 +184,8 @@ def convert_coco_to_jsonl(
                 x, y, w, h = bbox[:4]
                 if w * h < min_box_area:
                     continue
-                img_w = img.get("width", 640)
-                img_h = img.get("height", 480)
+                cat_id = ann.get("category_id")
+                cat_name = cat_map.get(cat_id, "object")
                 x1 = int(max(0, x) * 1000 / img_w)
                 y1 = int(max(0, y) * 1000 / img_h)
                 x2 = int(min(img_w, x + w) * 1000 / img_w)
@@ -209,29 +194,37 @@ def convert_coco_to_jsonl(
                 y1 = min(1000, max(0, y1))
                 x2 = min(1000, max(0, x2))
                 y2 = min(1000, max(0, y2))
-                boxes.append([x1, y1, x2, y2])
+                boxes_with_cats.append((cat_name, [x1, y1, x2, y2]))
+                seen_cats.add(cat_name)
 
-            if not boxes:
+            if not boxes_with_cats:
                 skipped += 1
                 continue
 
-            if len(boxes) > max_boxes_per_image:
-                boxes = boxes[:max_boxes_per_image]
+            if len(boxes_with_cats) > max_boxes_per_image:
+                boxes_with_cats = boxes_with_cats[:max_boxes_per_image]
 
-            box_token_str = boxes_to_tokens(boxes)
+            # Build per-category response tokens
+            gpt_parts = []
+            for cat_name, box in boxes_with_cats:
+                x1, y1, x2, y2 = box
+                gpt_parts.append(
+                    f"<ref>{cat_name}</ref><box><{x1}><{y1}><{x2}><{y2}></box>"
+                )
+            gpt_value = "".join(gpt_parts)
+
+            # Build prompt with category list
+            cat_list = "</c>".join(sorted(seen_cats))
+            human_value = f"Locate all the instances that matches the following description: {cat_list}."
+
+            # Store relative image path
+            rel_img_path = f"coco/{image_subdir}/{fname}"
 
             sample = {
-                "image": img_path,
+                "image": rel_img_path,
                 "conversations": [
-                    {
-                        "from": "user",
-                        "value": f"{SPECIAL_TOKENS['image']}\n{prompt_template}",
-                    },
-                    {
-                        "from": "assistant",
-                        "value": box_token_str,
-                        "boxes": boxes,
-                    },
+                    {"from": "human", "value": human_value},
+                    {"from": "gpt", "value": gpt_value},
                 ],
             }
 
@@ -249,7 +242,6 @@ def prepare(
     splits: Tuple[str, str] = ("train", "val"),
     max_images_per_split: Optional[Dict[str, int]] = None,
     max_boxes_per_image: int = 50,
-    prompt_template: str = "Detect all objects in this image.",
     download: bool = True,
 ):
     """End-to-end: download COCO + convert to JSONL.
@@ -261,7 +253,6 @@ def prepare(
         splits: Which splits to process
         max_images_per_split: e.g. {"train": 50000, "val": 1000}
         max_boxes_per_image: Cap boxes per sample
-        prompt_template: Prompt for every sample
         download: Auto-download missing data
     """
     os.makedirs(output_dir, exist_ok=True)
@@ -290,7 +281,6 @@ def prepare(
             year=year,
             max_boxes_per_image=max_boxes_per_image,
             max_images=max_images_per_split.get(split),
-            prompt_template=prompt_template,
         )
 
     logger.info(f"Done. Files in {output_dir}/")
@@ -311,6 +301,5 @@ def add_coco_parser(subparsers):
     parser.add_argument("--max_train", type=int, default=None, help="Limit train images")
     parser.add_argument("--max_val", type=int, default=None, help="Limit val images")
     parser.add_argument("--max_boxes", type=int, default=50, help="Max boxes per image")
-    parser.add_argument("--prompt", default="Detect all objects in this image.", help="Prompt template")
     parser.add_argument("--no-download", action="store_true", help="Skip download")
     return parser

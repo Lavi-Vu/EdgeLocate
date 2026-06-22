@@ -11,6 +11,14 @@ from .config import DataConfig
 from .utils import SPECIAL_TOKENS, COORD_TOKENS, load_image, logger
 
 
+ROLE_MAP = {
+    "user": "user",
+    "human": "user",
+    "assistant": "assistant",
+    "gpt": "assistant",
+}
+
+
 def parse_sharegpt_line(
     line: Dict,
     image_dir: str,
@@ -21,7 +29,9 @@ def parse_sharegpt_line(
     """Parse a JSON line into model inputs with discrete coordinate tokens.
 
     Supports:
-      Format 1 (legacy): {image, conversations: [{from, value, boxes}]}
+      Format 1 (conversations): {image, conversations: [{from, value}]}
+        Roles: user/human, assistant/gpt
+        Boxes inline via <ref>cat</ref><box><d><d><d><d></box> in GPT text.
       Format 2 (messages): {messages: [{role, content}]}
     """
     conversations = line.get("conversations", [])
@@ -31,7 +41,6 @@ def parse_sharegpt_line(
         return None
 
     image = None
-    boxes = None
 
     if messages:
         user_text = ""
@@ -47,10 +56,8 @@ def parse_sharegpt_line(
         if not assistant_text or not user_text:
             return None
 
-        # Parse boxes from inline format: <box><d><d><d><d></box>
         from .utils import parse_boxes_from_text
-        boxes = parse_boxes_from_text(assistant_text)
-        if not boxes:
+        if not parse_boxes_from_text(assistant_text):
             return None
 
         image_path = line.get("image_path", "")
@@ -59,84 +66,65 @@ def parse_sharegpt_line(
                 if msg.get("role") == "user" and "image_path" in msg:
                     image_path = msg["image_path"]
                     break
-
-        if image_path:
-            resolved = image_path if os.path.exists(image_path) else os.path.join(image_dir, os.path.basename(image_path))
-            if os.path.exists(resolved):
-                try:
-                    image = load_image(resolved, size=image_size)
-                except Exception:
-                    image = None
-
-        # Replace <image> with the special token <|image|>
-        user_text = user_text.replace("<image>", SPECIAL_TOKENS["image"])
-
-        if hasattr(tokenizer, "apply_chat_template"):
-            chat_messages = [
-                {"role": "user", "content": user_text},
-                {"role": "assistant", "content": assistant_text},
-            ]
-            try:
-                full_text = tokenizer.apply_chat_template(
-                    chat_messages, tokenize=False, add_generation_prompt=False
-                )
-            except Exception:
-                full_text = f"user\n{user_text}\nassistant\n{assistant_text}"
-        else:
-            full_text = f"User: {user_text}\nAssistant: {assistant_text}"
     else:
         image_path = line.get("image", "")
         if not image_path or not conversations:
             return None
 
-        resolved = image_path if os.path.exists(image_path) else os.path.join(image_dir, os.path.basename(image_path))
-        if not os.path.exists(resolved):
-            logger.warning(f"Image not found: {resolved}")
-            return None
-
-        try:
-            image = load_image(resolved, size=image_size)
-        except Exception as e:
-            logger.warning(f"Failed to load image {resolved}: {e}")
-            return None
-
-        for conv in conversations:
-            if conv.get("from") == "assistant" and "boxes" in conv:
-                boxes = conv["boxes"]
-                break
-        if boxes is None:
-            return None
-
         user_text = ""
         assistant_text = ""
         for conv in conversations:
-            if conv["from"] == "user":
+            role = ROLE_MAP.get(conv.get("from", ""), conv.get("from", ""))
+            if role == "user":
                 user_text = conv["value"]
-            elif conv["from"] == "assistant":
+            elif role == "assistant":
                 assistant_text = conv["value"]
 
         if not assistant_text:
             return None
 
-        # Replace <image> with the special token <|image|>
-        user_text = user_text.replace("<image>", SPECIAL_TOKENS["image"])
+        # Parse boxes from inline <ref>cat</ref><box><d><d><d><d></box> format
+        from .utils import parse_boxes_from_text
+        if not parse_boxes_from_text(assistant_text):
+            return None
 
-        if hasattr(tokenizer, "apply_chat_template"):
-            chat_messages = [
-                {"role": "user", "content": user_text},
-                {"role": "assistant", "content": assistant_text},
-            ]
-            try:
-                full_text = tokenizer.apply_chat_template(
-                    chat_messages, tokenize=False, add_generation_prompt=False
-                )
-            except Exception:
-                full_text = f"<|im_start|>user\n{user_text}<|im_end|>\n<|im_start|>assistant\n{assistant_text}<|im_end|>"
-        else:
-            full_text = f"User: {user_text}\nAssistant: {assistant_text}"
+    # Resolve image path
+    resolved = image_path
+    if not os.path.isabs(resolved):
+        resolved = os.path.join(image_dir, resolved)
+    if not os.path.exists(resolved):
+        basename = os.path.basename(image_path)
+        resolved = os.path.join(image_dir, basename)
+    if not os.path.exists(resolved):
+        return None
+
+    try:
+        image = load_image(resolved, size=image_size)
+    except Exception as e:
+        logger.warning(f"Failed to load image {resolved}: {e}")
+        return None
 
     if image is None:
         return None
+
+    # Prepend image token to user text if not already present
+    image_token = SPECIAL_TOKENS["image"]
+    if image_token not in user_text:
+        user_text = f"{image_token}\n{user_text}"
+
+    if hasattr(tokenizer, "apply_chat_template"):
+        chat_messages = [
+            {"role": "user", "content": user_text},
+            {"role": "assistant", "content": assistant_text},
+        ]
+        try:
+            full_text = tokenizer.apply_chat_template(
+                chat_messages, tokenize=False, add_generation_prompt=False
+            )
+        except Exception:
+            full_text = f"<|im_start|>user\n{user_text}<|im_end|>\n<|im_start|>assistant\n{assistant_text}<|im_end|>"
+    else:
+        full_text = f"User: {user_text}\nAssistant: {assistant_text}"
 
     enc = tokenizer(
         full_text,
@@ -154,7 +142,7 @@ def parse_sharegpt_line(
     assistant_start = -1
     for i in range(len(input_ids)):
         if input_ids[i] == assistant_token_id:
-            assistant_start = i + 1  # skip the newline after assistant
+            assistant_start = i + 1
             break
 
     if assistant_start < 0:

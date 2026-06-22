@@ -4,63 +4,27 @@ import json
 import math
 import os
 import random
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from PIL import Image, ImageDraw
 
-from .utils import ensure_dir, set_seed, logger, boxes_to_tokens, SPECIAL_TOKENS
+from .utils import ensure_dir, set_seed, logger
 
-SAMPLE_CAPTIONS = [
-    "Find all pedestrians in the scene.",
-    "Detect vehicles in this image.",
-    "Locate the traffic lights.",
-    "Find all animals in the image.",
-    "Detect all persons in the photo.",
-    "Locate the stop signs.",
-    "Find chairs and tables.",
-    "Detect all bottles and cups.",
-    "Locate all books on the shelf.",
-    "Find all cars in the parking lot.",
-    "Detect all cats in the picture.",
-    "Locate all dogs in the image.",
-    "Find all bicycles in the scene.",
-    "Detect all umbrellas.",
-    "Locate all street signs.",
+SHAPE_LABELS = [
+    "rectangle", "square", "circle", "triangle",
+    "pentagon", "star", "diamond", "ellipse",
 ]
 
-
-def generate_random_boxes(
-    num_boxes: int,
-    img_size: int = 224,
-    min_size: int = 10,
-    max_size: int = 112,
-) -> List[List[float]]:
-    """Generate random non-overlapping boxes in [0, img_size] range."""
-    boxes = []
-    attempts = 0
-    while len(boxes) < num_boxes and attempts < 100:
-        x1 = random.uniform(0, img_size - min_size)
-        y1 = random.uniform(0, img_size - min_size)
-        w = random.uniform(min_size, min(max_size, img_size - x1))
-        h = random.uniform(min_size, min(max_size, img_size - y1))
-        x2 = x1 + w
-        y2 = y1 + h
-
-        overlap = False
-        for bx1, by1, bx2, by2 in boxes:
-            inter_x1 = max(x1, bx1)
-            inter_y1 = max(y1, by1)
-            inter_x2 = min(x2, bx2)
-            inter_y2 = min(y2, by2)
-            if inter_x1 < inter_x2 and inter_y1 < inter_y2:
-                overlap = True
-                break
-
-        if not overlap:
-            boxes.append([x1, y1, x2, y2])
-        attempts += 1
-
-    return boxes
+SHAPE_COLORS = {
+    "rectangle": (255, 100, 100),
+    "square": (100, 255, 100),
+    "circle": (100, 100, 255),
+    "triangle": (255, 255, 100),
+    "pentagon": (255, 100, 255),
+    "star": (100, 255, 255),
+    "diamond": (200, 200, 100),
+    "ellipse": (200, 100, 200),
+}
 
 
 def generate_shape_based_boxes(
@@ -97,8 +61,7 @@ def _draw_rectangle(draw, img_size):
     y1 = random.randint(pad, img_size // 3)
     x2 = random.randint(2 * img_size // 3, img_size - pad)
     y2 = random.randint(2 * img_size // 3, img_size - pad)
-    color = tuple(random.randint(100, 255) for _ in range(3))
-    draw.rectangle([x1, y1, x2, y2], fill=color)
+    draw.rectangle([x1, y1, x2, y2], fill=SHAPE_COLORS["rectangle"])
     return [[x1, y1, x2, y2]]
 
 
@@ -109,8 +72,7 @@ def _draw_square(draw, img_size):
     y1 = random.randint(pad, img_size - side - pad)
     x2 = x1 + side
     y2 = y1 + side
-    color = tuple(random.randint(100, 255) for _ in range(3))
-    draw.rectangle([x1, y1, x2, y2], fill=color)
+    draw.rectangle([x1, y1, x2, y2], fill=SHAPE_COLORS["square"])
     return [[x1, y1, x2, y2]]
 
 
@@ -118,8 +80,7 @@ def _draw_circle(draw, img_size):
     r = random.randint(20, img_size // 4)
     cx = random.randint(r, img_size - r)
     cy = random.randint(r, img_size - r)
-    color = tuple(random.randint(100, 255) for _ in range(3))
-    draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=color)
+    draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=SHAPE_COLORS["circle"])
     return [[cx - r, cy - r, cx + r, cy + r]]
 
 
@@ -129,8 +90,7 @@ def _draw_triangle(draw, img_size):
     r = random.randint(30, img_size // 4)
     pts = [(cx + r * math.cos(2 * math.pi * i / 3 - math.pi / 2),
             cy + r * math.sin(2 * math.pi * i / 3 - math.pi / 2)) for i in range(3)]
-    color = tuple(random.randint(100, 255) for _ in range(3))
-    draw.polygon(pts, fill=color)
+    draw.polygon(pts, fill=SHAPE_COLORS["triangle"])
     xs = [p[0] for p in pts]
     ys = [p[1] for p in pts]
     return [[min(xs), min(ys), max(xs), max(ys)]]
@@ -142,8 +102,7 @@ def _draw_pentagon(draw, img_size):
     r = random.randint(30, img_size // 4)
     pts = [(cx + r * math.cos(2 * math.pi * i / 5 - math.pi / 2),
             cy + r * math.sin(2 * math.pi * i / 5 - math.pi / 2)) for i in range(5)]
-    color = tuple(random.randint(100, 255) for _ in range(3))
-    draw.polygon(pts, fill=color)
+    draw.polygon(pts, fill=SHAPE_COLORS["pentagon"])
     xs = [p[0] for p in pts]
     ys = [p[1] for p in pts]
     return [[min(xs), min(ys), max(xs), max(ys)]]
@@ -160,8 +119,7 @@ def _draw_star(draw, img_size):
                     cy + outer_r * math.sin(2 * math.pi * i / 5 - math.pi / 2)))
         pts.append((cx + inner_r * math.cos(2 * math.pi * (i + 0.5) / 5 - math.pi / 2),
                     cy + inner_r * math.sin(2 * math.pi * (i + 0.5) / 5 - math.pi / 2)))
-    color = tuple(random.randint(100, 255) for _ in range(3))
-    draw.polygon(pts, fill=color)
+    draw.polygon(pts, fill=SHAPE_COLORS["star"])
     xs = [p[0] for p in pts]
     ys = [p[1] for p in pts]
     return [[min(xs), min(ys), max(xs), max(ys)]]
@@ -174,8 +132,7 @@ def _draw_diamond(draw, img_size):
     dx = random.randint(20, img_size // 4)
     dy = random.randint(20, img_size // 4)
     pts = [(cx, cy - dy), (cx + dx, cy), (cx, cy + dy), (cx - dx, cy)]
-    color = tuple(random.randint(100, 255) for _ in range(3))
-    draw.polygon(pts, fill=color)
+    draw.polygon(pts, fill=SHAPE_COLORS["diamond"])
     x1, y1, x2, y2 = cx - dx, cy - dy, cx + dx, cy + dy
     return [[x1, y1, x2, y2]]
 
@@ -186,8 +143,7 @@ def _draw_ellipse(draw, img_size):
     y1 = random.randint(pad, img_size // 3)
     x2 = random.randint(2 * img_size // 3, img_size - pad)
     y2 = random.randint(2 * img_size // 3, img_size - pad)
-    color = tuple(random.randint(100, 255) for _ in range(3))
-    draw.ellipse([x1, y1, x2, y2], fill=color)
+    draw.ellipse([x1, y1, x2, y2], fill=SHAPE_COLORS["ellipse"])
     return [[x1, y1, x2, y2]]
 
 
@@ -200,50 +156,64 @@ def create_sample_dataset(
 ):
     """Create a synthetic dataset with shape-based boxes.
 
-    Generates images with colored shapes (rectangle, circle, triangle, etc.)
-    and their bounding boxes in discrete coordinate token format.
+    Generates images with colored shapes and their bounding boxes
+    in <ref>label</ref><box><d><d><d><d></box> format.
+
+    Each sample uses human/gpt roles with categories separated by </c>.
     """
     set_seed(seed)
     out_dir = os.path.dirname(output_path) or "."
     ensure_dir(out_dir)
 
-    image_dir = os.path.join(out_dir, "syn_images")
+    image_subdir = "syn_images"
+    image_dir = os.path.join(out_dir, image_subdir)
     ensure_dir(image_dir)
-
-    shape_types = ["rectangle", "square", "circle", "triangle", "pentagon", "star", "diamond", "ellipse"]
-
-    from PIL import Image
 
     with open(output_path, "w") as f:
         for i in range(num_samples):
             img = Image.new("RGB", (img_size, img_size), color=(0, 0, 0))
 
             num_shapes = random.randint(1, min(3, max_boxes_per_image))
-            all_boxes = []
+            boxes_with_labels = []
 
             for _ in range(num_shapes):
-                shape_type = random.choice(shape_types)
-                bbox, img = generate_shape_based_boxes(shape_type, img_size, canvas=img)
-                all_boxes.extend(bbox)
+                label = random.choice(SHAPE_LABELS)
+                bbox, img = generate_shape_based_boxes(label, img_size, canvas=img)
+                for box in bbox:
+                    boxes_with_labels.append((label, box))
 
-            img_path = os.path.join(image_dir, f"sample_{i:04d}.png")
-            img.save(img_path)
+            # Save image
+            fname = f"sample_{i:04d}.png"
+            abs_img_path = os.path.join(image_dir, fname)
+            img.save(abs_img_path)
 
-            box_tokens = boxes_to_tokens(all_boxes, img_size)
-            caption = random.choice(SAMPLE_CAPTIONS)
+            # Build GPT response: <ref>label</ref><box><d><d><d><d></box> per box
+            gpt_parts = []
+            seen_labels = set()
+            for label, box in boxes_with_labels:
+                x1, y1, x2, y2 = [int(round(c * 1000 / img_size)) for c in box]
+                x1 = max(0, min(1000, x1))
+                y1 = max(0, min(1000, y1))
+                x2 = max(0, min(1000, x2))
+                y2 = max(0, min(1000, y2))
+                gpt_parts.append(
+                    f"<ref>{label}</ref><box><{x1}><{y1}><{x2}><{y2}></box>"
+                )
+                seen_labels.add(label)
+            gpt_value = "".join(gpt_parts)
 
-            # Build assistant response with discrete coordinate tokens
-            assistant_text = box_tokens
+            # Build human prompt with unique categories
+            cat_list = "</c>".join(sorted(seen_labels))
+            human_value = f"Locate all the instances that matches the following description: {cat_list}."
+
+            # Store relative image path
+            rel_img_path = f"{image_subdir}/{fname}"
 
             sample = {
-                "image": img_path,
+                "image": rel_img_path,
                 "conversations": [
-                    {"from": "user", "value": f"{SPECIAL_TOKENS['image']}\n{caption}"},
-                    {
-                        "from": "assistant",
-                        "value": assistant_text,
-                        "boxes": all_boxes,
-                    },
+                    {"from": "human", "value": human_value},
+                    {"from": "gpt", "value": gpt_value},
                 ],
             }
             f.write(json.dumps(sample) + "\n")
