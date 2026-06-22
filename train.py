@@ -232,7 +232,7 @@ def run_evaluation(
 
 
 def main():
-    model_cfg, train_cfg, data_cfg, infer_cfg, action = parse_args()
+    model_cfg, train_cfg, data_cfg, infer_cfg, action, no_download = parse_args()
 
     import sys
     extra_args = {}
@@ -259,11 +259,13 @@ def main():
         prepare_refcoco(
             coco_root=data_cfg.image_dir or "./data/coco",
             output_dir=train_cfg.output_dir,
+            download=not no_download,
         )
     elif action == "prepare_coco":
         prepare_coco(
             coco_root=data_cfg.image_dir or "./data/coco",
             output_dir=train_cfg.output_dir,
+            download=not no_download,
         )
     else:
         logger.error(f"Unknown action: {action}")
