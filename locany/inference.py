@@ -46,6 +46,8 @@ class DetectionInferenceEngine:
         Returns:
             Dict with "text" (generated response) and "boxes" (list of [x1,y1,x2,y2])
         """
+        orig_w, orig_h = image.size
+
         from torchvision import transforms
         transform = transforms.Compose([
             transforms.Resize((224, 224)),
@@ -89,7 +91,7 @@ class DetectionInferenceEngine:
         full_ids = outputs.sequences if hasattr(outputs, "sequences") else outputs
         text_output = self.tokenizer.decode(full_ids[0], skip_special_tokens=False)
 
-        boxes = self._parse_boxes(text_output)
+        boxes = self._parse_boxes(text_output, orig_w, orig_h)
 
         return {
             "text": text_output,
@@ -97,10 +99,16 @@ class DetectionInferenceEngine:
             "sequences": full_ids,
         }
 
-    def _parse_boxes(self, text: str) -> List[List[float]]:
-        """Parse boxes from generated text: <box><d><d><d><d></box>."""
+    def _parse_boxes(self, text: str, img_w: int, img_h: int) -> List[List[float]]:
+        """Parse boxes from generated text and scale to original image size."""
         from .utils import parse_boxes_from_text
-        return parse_boxes_from_text(text)
+        boxes = parse_boxes_from_text(text)
+        return [[
+            int(b[0] * img_w / 1000),
+            int(b[1] * img_h / 1000),
+            int(b[2] * img_w / 1000),
+            int(b[3] * img_h / 1000),
+        ] for b in boxes]
 
     @torch.no_grad()
     def predict_batch(
@@ -119,16 +127,11 @@ def visualize_boxes(
     boxes: List[List[float]],
     output_path: Optional[str] = None,
 ) -> Image.Image:
-    """Draw boxes on image. Boxes are in [0, 1000] normalized coords."""
+    """Draw boxes on image. Boxes are in original image pixel coordinates."""
     draw = ImageDraw.Draw(image)
-    w, h = image.size
     for box in boxes:
-        x1, y1, x2, y2 = box
-        x1_px = int(x1 * w / 1000)
-        y1_px = int(y1 * h / 1000)
-        x2_px = int(x2 * w / 1000)
-        y2_px = int(y2 * h / 1000)
-        draw.rectangle([x1_px, y1_px, x2_px, y2_px], outline="red", width=3)
+        x1, y1, x2, y2 = map(int, box)
+        draw.rectangle([x1, y1, x2, y2], outline="red", width=3)
     if output_path:
         image.save(output_path)
     return image
