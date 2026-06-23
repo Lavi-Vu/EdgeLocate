@@ -187,7 +187,7 @@ def run_inference(
             img_path = images[0]
             logger.info(f"Running inference on: {img_path}")
             image = load_image(img_path)
-            text = "Detect all objects in this image."
+            text = "Locate all the instances that matches the following description: all objects."
 
             result = engine.predict(image, text)
             logger.info(f"Generated text: {result['text'][:200]}...")

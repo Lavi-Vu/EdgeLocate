@@ -17,6 +17,8 @@ SPECIAL_TOKENS = {
     "image": "<|image|>",
     "box_start": "<box>",
     "box_end": "</box>",
+    "ref_start": "<ref>",
+    "ref_end": "</ref>",
 }
 
 COORD_TOKENS = [f"<{i}>" for i in range(1001)]
@@ -27,6 +29,8 @@ COORD_START_ID = 151668
 BOX_START_TOKEN_ID = 151666
 BOX_END_TOKEN_ID = 151667
 IMAGE_TOKEN_ID = 151665
+REF_START_TOKEN_ID = 151669
+REF_END_TOKEN_ID = 151670
 
 
 def coord_to_token(coord: int) -> str:
@@ -58,9 +62,29 @@ def boxes_to_tokens(boxes: List[List[float]], img_size: int = 224) -> str:
 
 def parse_boxes_from_text(text: str) -> List[List[float]]:
     boxes = []
+    seen = set()
+
+    def add(b):
+        t = tuple(b)
+        if t not in seen:
+            seen.add(t)
+            boxes.append(b)
+
+    # Pattern 1: <ref>label</ref><box><d><d><d><d></box>
+    for m in re.finditer(r"<ref>[^<]*</ref><box><(\d+)><(\d+)><(\d+)><(\d+)></box>", text):
+        add([int(g) for g in m.groups()])
+    # Pattern 2: <box><d><d><d><d></box> (standalone boxes, no ref)
     for m in re.finditer(r"<box><(\d+)><(\d+)><(\d+)><(\d+)></box>", text):
-        x1, y1, x2, y2 = [int(g) for g in m.groups()]
-        boxes.append([x1, y1, x2, y2])
+        add([int(g) for g in m.groups()])
+    # Pattern 3: <ref>label<d+><d+><d+><d+>... (malformed, missing </ref><box>)
+    for m in re.finditer(r"<ref>[^<]*((?:<\d+>)+)(?:</box>|$)", text):
+        coords = [int(x.group(1)) for x in re.finditer(r"<(\d+)>", m.group(1))]
+        for i in range(0, len(coords) - len(coords) % 4, 4):
+            add(coords[i:i+4])
+    # Pattern 4: bare <d><d><d><d></box> (no ref at all)
+    for m in re.finditer(r"<(\d+)><(\d+)><(\d+)><(\d+)></box>", text):
+        add([int(g) for g in m.groups()])
+
     return boxes
 
 
