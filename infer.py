@@ -15,10 +15,10 @@ from locany import (
     load_model_from_dir,
     DetectionInferenceEngine,
     visualize_boxes,
-    load_image,
     LOCANY_SPECIAL_TOKENS,
     SPECIAL_TOKENS,
 )
+from PIL import Image
 from transformers import AutoTokenizer
 
 
@@ -75,7 +75,7 @@ def main():
     engine = DetectionInferenceEngine(model, tokenizer, infer_cfg)
 
     print(f"Loading image: {args.image}")
-    image = load_image(args.image)
+    image = Image.open(args.image).convert("RGB")
     print(f"Running inference with prompt: {args.prompt}")
     result = engine.predict(image, args.prompt)
 
