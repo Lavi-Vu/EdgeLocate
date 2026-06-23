@@ -186,7 +186,8 @@ def run_inference(
         if images:
             img_path = images[0]
             logger.info(f"Running inference on: {img_path}")
-            image = load_image(img_path)
+            from PIL import Image
+            image = Image.open(img_path).convert("RGB")
             text = "Locate all the instances that matches the following description: all objects."
 
             result = engine.predict(image, text)
