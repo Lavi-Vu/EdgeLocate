@@ -11,6 +11,37 @@ from .model import LocateAnythingForDetection
 from .utils import logger, set_seed
 
 
+class _DetectionTrainer(Trainer):
+    """Custom Trainer that saves LoRA adapter and non-llm weights with every checkpoint."""
+
+    def _save(self, output_dir: Optional[str] = None, state_dict=None):
+        super()._save(output_dir, state_dict)
+        if output_dir is None:
+            output_dir = self.args.output_dir
+        save_adapter_and_extra(self.model, output_dir, self.processing_class)
+
+
+def save_adapter_and_extra(model, output_dir: str, tokenizer=None):
+    """Save LoRA adapter (if present), non-LLM weights, tokenizer, and config."""
+    if hasattr(model, "llm") and hasattr(model.llm, "peft_config"):
+        model.llm.save_pretrained(output_dir)
+        logger.info(f"LoRA adapter saved to {output_dir}")
+        non_llm_state = {k: v for k, v in model.state_dict().items() if not k.startswith("llm.")}
+        extra_state = {}
+        for k, v in model.state_dict().items():
+            if k.startswith("llm.") and "lora_" not in k and ("lm_head" in k or "embed_tokens" in k):
+                extra_state[k] = v
+        save_dict = {**non_llm_state, **extra_state}
+        if save_dict:
+            torch.save(save_dict, os.path.join(output_dir, "non_llm.pt"))
+            logger.info(f"Non-LoRA weights saved ({len(save_dict)} keys)")
+    else:
+        model.save_pretrained(output_dir)
+        logger.info(f"Full model saved to {output_dir}")
+    if tokenizer is not None:
+        tokenizer.save_pretrained(output_dir)
+
+
 def setup_training(
     model: LocateAnythingForDetection,
     model_cfg: ModelConfig,
@@ -32,6 +63,11 @@ def setup_training(
     if deepspeed_config and not os.path.exists(deepspeed_config):
         logger.warning(f"DeepSpeed config not found: {deepspeed_config}")
         deepspeed_config = None
+
+    if tokenizer is not None:
+        processing_class = tokenizer
+    else:
+        processing_class = None
 
     training_args = TrainingArguments(
         output_dir=train_cfg.output_dir,
@@ -60,13 +96,13 @@ def setup_training(
     if data_collator is None:
         data_collator = DetectionDataCollator(tokenizer)
 
-    trainer = Trainer(
+    trainer = _DetectionTrainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         data_collator=data_collator,
-        processing_class=tokenizer,
+        processing_class=processing_class,
     )
 
     return trainer
@@ -95,24 +131,7 @@ class DetectionDataCollator:
 
 def save_model(trainer: Trainer, output_dir: str, tokenizer=None, model_cfg: Optional[ModelConfig] = None):
     os.makedirs(output_dir, exist_ok=True)
-    model = trainer.model
-    if hasattr(model, "llm") and hasattr(model.llm, "peft_config"):
-        model.llm.save_pretrained(output_dir)
-        logger.info(f"LoRA adapter saved to {output_dir}")
-        non_llm_state = {k: v for k, v in model.state_dict().items() if not k.startswith("llm.")}
-        extra_state = {}
-        for k, v in model.state_dict().items():
-            if k.startswith("llm.") and "lora_" not in k and ("lm_head" in k or "embed_tokens" in k):
-                extra_state[k] = v
-        save_dict = {**non_llm_state, **extra_state}
-        if save_dict:
-            torch.save(save_dict, os.path.join(output_dir, "non_llm.pt"))
-            logger.info(f"Non-LoRA weights saved ({len(save_dict)} keys)")
-    else:
-        trainer.save_model(output_dir)
-        logger.info(f"Full model saved to {output_dir}")
-    if tokenizer is not None:
-        tokenizer.save_pretrained(output_dir)
+    save_adapter_and_extra(trainer.model, output_dir, tokenizer)
     if model_cfg is not None:
         cfg_path = os.path.join(output_dir, "locany_config.json")
         with open(cfg_path, "w") as f:
