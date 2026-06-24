@@ -47,10 +47,11 @@ class DetectionInferenceEngine:
             Dict with "text" (generated response) and "boxes" (list of [x1,y1,x2,y2])
         """
         orig_w, orig_h = image.size
+        ve_size = self.model.vision_encoder.image_size
 
         from torchvision import transforms
         transform = transforms.Compose([
-            transforms.Resize((224, 224)),
+            transforms.Resize((ve_size, ve_size)),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
         ])
@@ -135,3 +136,4 @@ def visualize_boxes(
     if output_path:
         image.save(output_path)
     return image
+

@@ -2,13 +2,13 @@
 
 A <1B LocateAnything variant using **discrete coordinate tokens** (like EAGLE) instead of a regression head. Box coordinates are predicted as vocabulary tokens `<0>`–`<1000>` via standard cross-entropy loss through the LM head.
 
-Base model: **Qwen2.5-0.5B-Instruct** + **SigLIP-Base-Patch16-224** + 2-layer MLP projector + LoRA.
+Default base: **Qwen2.5-0.5B-Instruct** + **SigLIP-Base-Patch16-224** + 2-layer MLP projector + LoRA.
 
 ## Architecture
 
 ```
                                 ┌──────────────────────────────────────┐
-  Image ──► SigLIP Vision ──► MLP Projector ──┐                       │
+  Image ──► Vision Encoder ──► MLP Projector ──┐                      │
                                 │              ▼                       │
   Text ──► Tokenizer ──► Embedding ──► Qwen2.5 LLM+LoRA ──► LM Head ──► Token IDs
                                 │              ▲                       │
@@ -17,18 +17,18 @@ Base model: **Qwen2.5-0.5B-Instruct** + **SigLIP-Base-Patch16-224** + 2-layer ML
 
 | Component | Model | Params | Default Freeze |
 |---|---|---|---|
-| Vision Encoder | `google/siglip-base-patch16-224` | 92.88M | ✅ Frozen |
-| MLP Projector | 2-layer Linear+GELU (768→896) | 1.49M | ❌ Trainable |
+| Vision Encoder | `google/siglip-base-patch16-224` (or SigLIP2, MobileCLIP, ...) | 92.88M | ✅ Frozen |
+| MLP Projector | 2-layer Linear+GELU (VE hidden → LLM hidden) | ~1.5M | ❌ Trainable |
 | LLM | `Qwen/Qwen2.5-0.5B-Instruct` | 494.03M | ❌ LoRA (r=64–128) |
 | LM Head | Shared/untied output projection | 0.14M (untied) | ❌ Trainable |
-| **Total** | | **589.62M** | **~36.7M trainable** |
+| **Total** | | **~589M** | **~37M trainable** |
 
 ## How It Works
 
-1. **Tokenization**: 1001 discrete coordinate tokens `<0>`–`<1000>` (IDs 151668–152668) plus `<box>` (151666) and `</box>` (151667) are added to the vocabulary
-2. **Training**: Standard autoregressive next-token prediction. The assistant response contains `<box><d1><d2><d3><d4></box>` sequences where each `<d>` is a quantized coordinate in [0, 1000]
+1. **Tokenization**: 1001 discrete coordinate tokens `<0>`–`<1000>` (IDs 151668–152668) plus `<box>` (151666), `</box>` (151667), `<ref>` (151669), and `</ref>` (151670) are added to the vocabulary
+2. **Training**: Standard autoregressive next-token prediction. The GPT response contains `<ref>label</ref><box><d1><d2><d3><d4></box>` sequences where each `<d>` is a quantized coordinate in [0, 1000]
 3. **Generation**: Standard `llm.generate()` with `inputs_embeds` (visual features replace the `<|image|>` token position). The model auto-regressively produces coordinate tokens.
-4. **Box parsing**: Regex extracts `<box><(\d+)><(\d+)><(\d+)><(\d+)></box>` patterns from generated text.
+4. **Box parsing**: Regex extracts `<ref>label</ref><box><(\d+)><(\d+)><(\d+)><(\d+)></box>` patterns from generated text, with fallbacks for malformed output.
 
 ## Setup
 
@@ -43,7 +43,7 @@ pip install torch transformers accelerate pillow torchvision peft safetensors te
 python train.py --action create_sample --train_data_path ./data.jsonl --num_samples 200
 ```
 
-### Train
+### Train (default VE)
 ```bash
 python train.py --action train \
   --train_data_path ./data.jsonl \
@@ -55,12 +55,31 @@ python train.py --action train \
   --lora_r 64 --lora_alpha 128
 ```
 
+### Train with a different Vision Encoder
+```bash
+python train.py --action train \
+  --ve_model "google/siglip2-base-patch16-224" \
+  --train_data_path ./data.jsonl \
+  --image_dir . \
+  --output_dir ./outputs \
+  --num_epochs 20 \
+  --per_device_batch_size 1 \
+  --learning_rate 5e-5
+```
+
+Supported VEs:
+- `google/siglip-base-patch16-224` (default)
+- `google/siglip2-base-patch16-224`
+- `google/siglip2-base-patch16-naflex`
+- `google/siglip-so400m-patch14-384`
+- `apple/MobileCLIP2-B`
+
 ### Inference (via `infer.py`)
 ```bash
 python infer.py \
   --model_dir ./outputs \
   --image path/to/image.jpg \
-  --prompt "Detect all objects."
+  --prompt "Locate all the instances that matches the following description: all objects."
 ```
 
 ### COCO Detection
@@ -110,26 +129,29 @@ python train.py --action inference \
 
 ## Data Format
 
-ShareGPT-style JSONL with `<box>` tokens in the assistant response:
+ShareGPT-style JSONL with `<ref>` and `<box>` tokens in the GPT response:
 
 ```json
 {
-  "image": "path/to/image.jpg",
+  "image": "coco/train2017/000001.jpg",
   "conversations": [
     {
-      "from": "user",
-      "value": "<|image|>\nDetect all cats in this image."
+      "from": "human",
+      "value": "Locate all the instances that matches the following description: car</c>person</c>bicycle."
     },
     {
-      "from": "assistant",
-      "value": "<box><120><340><560><780></box><box><890><450><100><768></box>",
-      "boxes": [[120, 340, 560, 780], [890, 450, 100, 768]]
+      "from": "gpt",
+      "value": "<ref>car</ref><box><120><200><450><500></box><ref>person</ref><box><50><100><200><600></box>"
     }
   ]
 }
 ```
 
-Coordinates are in [0, 1000] range, quantized to integer bins.
+- **Roles**: `human` / `gpt` (also accepts `user` / `assistant` for backward compatibility)
+- **Prompt**: Categories listed separated by `</c>`
+- **Response**: `<ref>label</ref><box><d1><d2><d3><d4></box>` per instance
+- **Coordinates**: In [0, 1000] range, quantized to integer bins
+- **Image path**: Relative to `image_dir` or absolute
 
 ## Key Design Decisions
 
@@ -152,8 +174,8 @@ model = load_model_from_dir("./outputs", tokenizer).cuda().eval()
 
 # Run inference
 engine = DetectionInferenceEngine(model, tokenizer, InferenceConfig())
-result = engine.predict(image, "Detect all objects.")
-print(result["boxes"])  # [[x1, y1, x2, y2], ...] in [0, 1000]
+result = engine.predict(image, "Locate all the instances that matches the following description: all objects.")
+print(result["boxes"])  # [[x1, y1, x2, y2], ...] in original image pixel coords
 
 # Visualize
 from locany import visualize_boxes
@@ -173,6 +195,13 @@ Model:
   --attn_implementation           {sdpa,flash_attention_2,eager}
   --torch_dtype                   {float32,float16,bfloat16}
 
+Vision Encoders:
+  google/siglip-base-patch16-224      (default, 224px, 768 dim)
+  google/siglip2-base-patch16-224      (SigLIP2, 224px)
+  google/siglip2-base-patch16-naflex   (SigLIP2 + FlexiViT)
+  google/siglip-so400m-patch14-384     (So400m, 384px, 1152 dim)
+  apple/MobileCLIP2-B                  (MobileCLIP)
+
 Training:
   --output_dir, --num_epochs, --per_device_batch_size
   --learning_rate, --warmup_ratio, --weight_decay
@@ -186,13 +215,16 @@ Data:
 
 Inference:
   --max_new_tokens, --temperature, --top_p
+
+Actions:
+  --action {train,inference,eval,create_sample,prepare_refcoco,prepare_coco}
 ```
 
 ## Requirements
 
 - Python 3.10+
 - PyTorch 2.0+
-- transformers 4.38+
+- transformers 4.45+ (for SigLIP2 support)
 - accelerate, Pillow, torchvision
 - peft (for LoRA)
 - Optional: deepspeed, tensorboard

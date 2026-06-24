@@ -46,25 +46,55 @@ class MLPProjector(nn.Module):
 
 
 class VisionEncoderWrapper(nn.Module):
-    """Wrapper for vision encoder models."""
+    """Wrapper for vision encoder models.
+
+    Supports:
+      - Google SigLIP / SigLIP2 (via SiglipVisionModel / Siglip2VisionModel)
+      - Apple MobileCLIP (via AutoModel with trust_remote_code)
+      - Any HF-compatible vision encoder (via AutoModel)
+    """
 
     def __init__(self, model_name: str, select_layer: int = -1, dtype: torch.dtype = torch.bfloat16):
         super().__init__()
         self.select_layer = select_layer
         self.dtype = dtype
         self.model_name = model_name
+        self._load_encoder()
 
-        if "siglip" in model_name.lower():
-            from transformers import SiglipVisionModel
-            self.encoder = SiglipVisionModel.from_pretrained(
-                model_name, dtype=dtype, ignore_mismatched_sizes=True,
+    def _load_encoder(self):
+        name = self.model_name.lower()
+        if "siglip2" in name:
+            try:
+                from transformers import Siglip2VisionModel
+                self.encoder = Siglip2VisionModel.from_pretrained(
+                    self.model_name, dtype=self.dtype, ignore_mismatched_sizes=True,
+                )
+            except (ImportError, OSError, ValueError):
+                from transformers import AutoModel
+                self.encoder = AutoModel.from_pretrained(
+                    self.model_name, dtype=self.dtype, trust_remote_code=True,
+                )
+        elif "siglip" in name:
+            try:
+                from transformers import SiglipVisionModel
+                self.encoder = SiglipVisionModel.from_pretrained(
+                    self.model_name, dtype=self.dtype, ignore_mismatched_sizes=True,
+                )
+            except (OSError, ValueError):
+                self.encoder = AutoModel.from_pretrained(
+                    self.model_name, dtype=self.dtype, trust_remote_code=True,
+                )
+        elif "mobileclip" in name:
+            self.encoder = AutoModel.from_pretrained(
+                self.model_name, dtype=self.dtype, trust_remote_code=True,
             )
-            self.hidden_size = self.encoder.config.hidden_size
-            self.image_size = self.encoder.config.image_size
         else:
-            self.encoder = AutoModel.from_pretrained(model_name, dtype=dtype)
-            self.hidden_size = self.encoder.config.hidden_size
-            self.image_size = getattr(self.encoder.config, "image_size", 224)
+            self.encoder = AutoModel.from_pretrained(
+                self.model_name, dtype=self.dtype, trust_remote_code=True,
+            )
+
+        self.hidden_size = self.encoder.config.hidden_size
+        self.image_size = getattr(self.encoder.config, "image_size", 224)
 
     def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
         with torch.set_grad_enabled(self.training):
@@ -78,7 +108,9 @@ class VisionEncoderWrapper(nn.Module):
     @property
     def num_patches(self) -> int:
         if "siglip" in self.model_name.lower():
-            return 1
+            ps = getattr(self.encoder.config, "patch_size", 16)
+            isz = self.image_size
+            return (isz // ps) ** 2
         ps = getattr(self.encoder.config, "patch_size", 16)
         isz = self.image_size
         n = (isz // ps) ** 2
@@ -253,8 +285,15 @@ class LocateAnythingForDetection(PreTrainedModel):
         """Expand labels to match merged sequence length by inserting -100 for visual tokens."""
         if self.image_token_id is None:
             return labels
+        ve = self.vision_encoder
+        ps = getattr(ve.encoder.config, "patch_size", 16)
+        isz = ve.image_size
+        num_patches = (isz // ps) ** 2
+        num_cls = getattr(ve.encoder.config, "num_cls_tokens", 0)
+        if "siglip" in ve.model_name.lower():
+            num_cls = 0
+        num_vis = num_patches + num_cls
         new_labels_list = []
-        num_vis = 196
         for b in range(labels.shape[0]):
             lbl = labels[b]
             ids = input_ids[b]

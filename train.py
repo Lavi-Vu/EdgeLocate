@@ -109,11 +109,15 @@ def run_training(
     trainable = get_model_size(model, trainable_only=True)
     logger.info(f"Model size: {total} total, {trainable} trainable")
 
+    ve_image_size = model.vision_encoder.image_size
+    train_image_size = (ve_image_size, ve_image_size)
+
     train_dataset = DetectionDataset(
         data_path=data_cfg.train_data_path,
         image_dir=data_cfg.image_dir,
         tokenizer=tokenizer,
         max_length=data_cfg.max_length,
+        image_size=train_image_size,
     )
 
     eval_dataset = None
@@ -123,6 +127,7 @@ def run_training(
             image_dir=data_cfg.image_dir,
             tokenizer=tokenizer,
             max_length=data_cfg.max_length,
+            image_size=train_image_size,
         )
 
     trainer = setup_training(
@@ -219,11 +224,13 @@ def run_evaluation(
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
 
+    ve_image_size = model.vision_encoder.image_size
     eval_dataset = DetectionDataset(
         data_path=data_cfg.eval_data_path or data_cfg.train_data_path,
         image_dir=data_cfg.image_dir,
         tokenizer=tokenizer,
         max_length=data_cfg.max_length,
+        image_size=(ve_image_size, ve_image_size),
     )
 
     results = evaluate_model(model, tokenizer, eval_dataset, max_samples=50)
