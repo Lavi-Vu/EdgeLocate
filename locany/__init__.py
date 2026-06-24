@@ -3,7 +3,7 @@ from .model import LocateAnythingForDetection, create_model, load_model_from_dir
 from .dataset import DetectionDataset as DetectionDataset, parse_sharegpt_line
 from .training import setup_training, save_model
 from .inference import DetectionInferenceEngine, visualize_boxes
-from .eval import compute_iou, compute_precision_recall, evaluate_model
+from .eval import compute_iou, compute_precision_recall, evaluate_model, run_benchmark, benchmark_on_jsonl, compute_coco_ap, compute_ap
 from .utils import set_seed, ensure_dir, get_model_size, load_image, SPECIAL_TOKENS, LOCANY_SPECIAL_TOKENS, COORD_TOKENS, boxes_to_tokens, parse_boxes_from_text
 from .create_sample_data import create_sample_dataset
 from .prepare_refcoco import prepare as prepare_refcoco

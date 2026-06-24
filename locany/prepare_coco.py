@@ -144,11 +144,6 @@ def convert_coco_to_jsonl(
         img_to_anns[ann["image_id"]].append(ann)
 
     images = ann_data.get("images", [])
-    if split == "train":
-        images = [img for img in images if "val" not in img.get("file_name", "train")]
-    elif split == "val":
-        images = [img for img in images if "val" in img.get("file_name", "")]
-
     if max_images:
         images = images[:max_images]
 

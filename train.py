@@ -240,7 +240,7 @@ def run_evaluation(
 
 
 def main():
-    model_cfg, train_cfg, data_cfg, infer_cfg, action, no_download = parse_args()
+    model_cfg, train_cfg, data_cfg, infer_cfg, action, no_download, splits, max_train, max_val = parse_args()
 
     import sys
     extra_args = {}
@@ -270,9 +270,16 @@ def main():
             download=not no_download,
         )
     elif action == "prepare_coco":
+        max_images_per_split = {}
+        if max_train is not None:
+            max_images_per_split["train"] = max_train
+        if max_val is not None:
+            max_images_per_split["val"] = max_val
         prepare_coco(
             coco_root=data_cfg.image_dir or "./data/coco",
             output_dir=train_cfg.output_dir,
+            splits=splits,
+            max_images_per_split=max_images_per_split or None,
             download=not no_download,
         )
     else:

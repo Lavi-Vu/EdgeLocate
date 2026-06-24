@@ -84,11 +84,19 @@ python infer.py \
 
 ### COCO Detection
 ```bash
-# Prepare dataset (downloads COCO 2017 train+val)
+# Prepare training set (downloads COCO 2017 train)
 python train.py --action prepare_coco \
   --image_dir ./data/coco \
   --output_dir ./data/coco_detection \
-  --max_train 50000 --max_val 1000
+  --splits train \
+  --max_train 50000
+
+# Prepare validation set for evaluation
+python train.py --action prepare_coco \
+  --image_dir ./data/coco \
+  --output_dir ./data/coco_detection \
+  --splits val \
+  --no-download
 
 # Train on COCO detection (50k images, multiple objects per image)
 python train.py --action train \
@@ -101,6 +109,19 @@ python train.py --action train \
   --learning_rate 3e-5 \
   --lora_r 64
 ```
+
+### Benchmark / Evaluation
+```bash
+# Evaluate trained model on COCO val set
+python evaluate.py \
+  --model_dir ./outputs_coco \
+  --data ./data/coco_detection/val.jsonl \
+  --image_dir ./data/coco/val2017 \
+  --max_samples 500 \
+  --output ./results.json
+```
+
+Outputs per-IoU-threshold metrics (AP@0.5, F1@0.75, etc.) plus mean AP, Precision, Recall, F1 across IoU 0.5:0.95.
 
 ### RefCOCO+
 ```bash
