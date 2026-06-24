@@ -10,6 +10,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import torch
 from PIL import Image
+from transformers import AutoTokenizer
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +118,37 @@ def load_image(image_path: str, size: Tuple[int, int] = (224, 224)) -> Image.Ima
     img = Image.open(image_path).convert("RGB")
     img = img.resize(size, Image.LANCZOS)
     return img
+
+
+DEFAULT_CHAT_TEMPLATE = (
+    "{%- if messages[0]['role'] == 'system' %}"
+    "{{ '<|im_start|>system\\n' + messages[0]['content'] + '<|im_end|>\\n' }}"
+    "{%- endif %}"
+    "{%- for message in messages %}"
+    "{%- if message.role == 'user' %}"
+    "{{ '<|im_start|>user\\n' + message.content + '<|im_end|>\\n' }}"
+    "{%- elif message.role == 'assistant' %}"
+    "{{ '<|im_start|>assistant\\n' + message.content + '<|im_end|>\\n' }}"
+    "{%- endif %}"
+    "{%- endfor %}"
+    "{%- if add_generation_prompt %}"
+    "{{ '<|im_start|>assistant\\n' }}"
+    "{%- endif %}"
+)
+
+def setup_tokenizer(model_cfg) -> AutoTokenizer:
+    """Load tokenizer, add special tokens, and set default chat template."""
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_cfg.llm_model,
+        trust_remote_code=True,
+        padding_side="right",
+        use_fast=True,
+    )
+    tokenizer.add_special_tokens({"additional_special_tokens": LOCANY_SPECIAL_TOKENS})
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.chat_template = DEFAULT_CHAT_TEMPLATE
+    return tokenizer
 
 
 def denormalize_boxes(

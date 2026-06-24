@@ -73,6 +73,7 @@ Supported VEs:
 - `google/siglip2-base-patch16-naflex`
 - `google/siglip-so400m-patch14-384`
 - `apple/MobileCLIP2-B`
+- `moonshotai/MoonViT-SO-400M` (native-resolution, 1152 dim, `trust_remote_code=True`)
 
 ### Inference (via `infer.py`)
 ```bash
@@ -217,11 +218,12 @@ Model:
   --torch_dtype                   {float32,float16,bfloat16}
 
 Vision Encoders:
-  google/siglip-base-patch16-224      (default, 224px, 768 dim)
-  google/siglip2-base-patch16-224      (SigLIP2, 224px)
-  google/siglip2-base-patch16-naflex   (SigLIP2 + FlexiViT)
-  google/siglip-so400m-patch14-384     (So400m, 384px, 1152 dim)
-  apple/MobileCLIP2-B                  (MobileCLIP)
+  google/siglip-base-patch16-224        (default, 224px, 768 dim)
+  google/siglip2-base-patch16-224        (SigLIP2, 224px)
+  google/siglip2-base-patch16-naflex     (SigLIP2 + FlexiViT)
+  google/siglip-so400m-patch14-384       (So400m, 384px, 1152 dim)
+  apple/MobileCLIP2-B                    (MobileCLIP)
+  moonshotai/MoonViT-SO-400M             (native-resolution, 896px, 1152 dim)
 
 Training:
   --output_dir, --num_epochs, --per_device_batch_size

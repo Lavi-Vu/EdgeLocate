@@ -33,8 +33,6 @@ from locany import (
     set_seed,
     get_model_size,
     load_image,
-    LOCANY_SPECIAL_TOKENS,
-    COORD_TOKENS,
 )
 
 for h in logging.root.handlers[:]:
@@ -45,26 +43,12 @@ logger = logging.getLogger("train_locany")
 
 def setup_tokenizer(model_cfg: ModelConfig):
     """Load tokenizer and add coordinate tokens plus special tokens."""
-    from transformers import AutoTokenizer
-    from locany.utils import SPECIAL_TOKENS, COORD_TOKENS, LOCANY_SPECIAL_TOKENS
+    from locany.utils import setup_tokenizer as _setup, COORD_TOKENS
 
-    tokenizer = AutoTokenizer.from_pretrained(
-        model_cfg.llm_model,
-        trust_remote_code=True,
-        padding_side="right",
-        use_fast=True,
-    )
-
-    special_tokens_dict = {"additional_special_tokens": LOCANY_SPECIAL_TOKENS}
-    tokenizer.add_special_tokens(special_tokens_dict)
-
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-
+    tokenizer = _setup(model_cfg)
     logger.info(f"Tokenizer loaded: {model_cfg.llm_model}")
     logger.info(f"Vocab size: {len(tokenizer)}")
     logger.info(f"Added {len(COORD_TOKENS)} coordinate tokens + special tokens")
-
     return tokenizer
 
 

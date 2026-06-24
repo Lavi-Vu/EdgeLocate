@@ -23,16 +23,8 @@ from transformers import AutoTokenizer
 
 
 def setup_tokenizer(model_cfg: ModelConfig):
-    tokenizer = AutoTokenizer.from_pretrained(
-        model_cfg.llm_model,
-        trust_remote_code=True,
-        padding_side="right",
-        use_fast=True,
-    )
-    tokenizer.add_special_tokens({"additional_special_tokens": LOCANY_SPECIAL_TOKENS})
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    return tokenizer
+    from locany.utils import setup_tokenizer as _setup
+    return _setup(model_cfg)
 
 
 def main():

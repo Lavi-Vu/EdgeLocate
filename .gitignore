@@ -1,7 +1,6 @@
 *.png
 *.jpg
 *.jpeg
-*.json
 *.jsonl
 *.log
 *.pyc
@@ -14,3 +13,5 @@
 *.jinja
 output*/
 test_*/
+__pycache__/
+__pycache__/*

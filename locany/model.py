@@ -51,6 +51,7 @@ class VisionEncoderWrapper(nn.Module):
     Supports:
       - Google SigLIP / SigLIP2 (via SiglipVisionModel / Siglip2VisionModel)
       - Apple MobileCLIP (via AutoModel with trust_remote_code)
+      - Moonshot MoonViT (native-resolution, auto-computes grid_hws)
       - Any HF-compatible vision encoder (via AutoModel)
     """
 
@@ -60,17 +61,35 @@ class VisionEncoderWrapper(nn.Module):
         self.dtype = dtype
         self.model_name = model_name
         self._load_encoder()
+        self._patch_size = getattr(self.encoder.config, "patch_size", 14)
 
     def _load_encoder(self):
         name = self.model_name.lower()
-        if "siglip2" in name:
+        if "moonvit" in name:
+            import sys as _sys
+            try:
+                self.encoder = AutoModel.from_pretrained(
+                    self.model_name, dtype=self.dtype, trust_remote_code=True,
+                )
+            except AttributeError as e:
+                if "all_tied_weights_keys" not in str(e):
+                    raise
+                for _mod_name, _mod in _sys.modules.copy().items():
+                    if "moonvit" in _mod_name.lower() and hasattr(_mod, "MoonVitPretrainedModel"):
+                        if not hasattr(_mod.MoonVitPretrainedModel, 'all_tied_weights_keys'):
+                            _mod.MoonVitPretrainedModel.all_tied_weights_keys = {}
+                        break
+                self.encoder = AutoModel.from_pretrained(
+                    self.model_name, dtype=self.dtype, trust_remote_code=True,
+                )
+            self._fix_moonvit_forward()
+        elif "siglip2" in name:
             try:
                 from transformers import Siglip2VisionModel
                 self.encoder = Siglip2VisionModel.from_pretrained(
                     self.model_name, dtype=self.dtype, ignore_mismatched_sizes=True,
                 )
             except (ImportError, OSError, ValueError):
-                from transformers import AutoModel
                 self.encoder = AutoModel.from_pretrained(
                     self.model_name, dtype=self.dtype, trust_remote_code=True,
                 )
@@ -94,19 +113,62 @@ class VisionEncoderWrapper(nn.Module):
             )
 
         self.hidden_size = self.encoder.config.hidden_size
-        self.image_size = getattr(self.encoder.config, "image_size", 224)
+        if "moonvit" in name:
+            grid_dim = getattr(self.encoder.config, "init_pos_emb_height", 64)
+            ps = self.encoder.config.patch_size
+            self.image_size = grid_dim * ps
+        else:
+            self.image_size = getattr(self.encoder.config, "image_size", 224)
+
+    def _fix_moonvit_forward(self):
+        """Monkey-patch MoonViT's patch_embed to output a single concatenated sequence (B*N, D)."""
+        orig_forward = self.encoder.patch_embed.forward
+
+        def patched_forward(self_patch, x, grid_hws):
+            x = self_patch.proj(x)
+            B, D, H, W = x.shape
+            x = x.permute(0, 2, 3, 1).reshape(B * H * W, D)
+            x = self_patch.pos_emb(x, grid_hws)
+            return x
+
+        import types
+        self.encoder.patch_embed.forward = types.MethodType(patched_forward, self.encoder.patch_embed)
 
     def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
         with torch.set_grad_enabled(self.training):
-            outputs = self.encoder(pixel_values, output_hidden_states=True)
-            if self.select_layer == -1:
-                feat = outputs.last_hidden_state
+            if "moonvit" in self.model_name.lower():
+                B = pixel_values.shape[0]
+                ps = self._patch_size
+                h = pixel_values.shape[2] // ps
+                w = pixel_values.shape[3] // ps
+                grid_hws = torch.tensor([[h, w]] * B, device=pixel_values.device, dtype=torch.long)
+                outputs = self.encoder(pixel_values, grid_hws)
+                if isinstance(outputs, (list, tuple)):
+                    feats_list = []
+                    for out in outputs:
+                        if out.dim() == 3 and out.shape[-2] > 1:
+                            N, K, D = out.shape
+                            feats_list.append(out.view(N * K, D))
+                        else:
+                            feats_list.append(out)
+                    feat = torch.stack(feats_list)
+                else:
+                    feat = outputs
+                return feat
             else:
-                feat = outputs.hidden_states[self.select_layer]
-            return feat
+                outputs = self.encoder(pixel_values, output_hidden_states=True)
+                if self.select_layer == -1:
+                    feat = outputs.last_hidden_state
+                else:
+                    feat = outputs.hidden_states[self.select_layer]
+                return feat
 
     @property
     def num_patches(self) -> int:
+        if "moonvit" in self.model_name.lower():
+            ps = self._patch_size
+            isz = self.image_size
+            return (isz // ps) ** 2
         if "siglip" in self.model_name.lower():
             ps = getattr(self.encoder.config, "patch_size", 16)
             isz = self.image_size
@@ -288,11 +350,16 @@ class LocateAnythingForDetection(PreTrainedModel):
         ve = self.vision_encoder
         ps = getattr(ve.encoder.config, "patch_size", 16)
         isz = ve.image_size
-        num_patches = (isz // ps) ** 2
-        num_cls = getattr(ve.encoder.config, "num_cls_tokens", 0)
-        if "siglip" in ve.model_name.lower():
-            num_cls = 0
-        num_vis = num_patches + num_cls
+
+        if "moonvit" in ve.model_name.lower():
+            num_vis = (isz // ps) ** 2
+        else:
+            num_patches = (isz // ps) ** 2
+            num_cls = getattr(ve.encoder.config, "num_cls_tokens", 0)
+            if "siglip" in ve.model_name.lower():
+                num_cls = 0
+            num_vis = num_patches + num_cls
+
         new_labels_list = []
         for b in range(labels.shape[0]):
             lbl = labels[b]
