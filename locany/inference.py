@@ -116,10 +116,74 @@ class DetectionInferenceEngine:
         self,
         images: List[Image.Image],
         texts: List[str],
+        batch_size: int = 8,
     ) -> List[Dict]:
+        """Run batched detection inference.
+
+        All images in a call share the same prompt text (texts[0] is used).
+        Processes in mini-batches of batch_size.
+
+        Args:
+            images: List of PIL Images
+            texts: List of text prompts (only first is used, shared across batch)
+            batch_size: Max images per generate call
+
+        Returns:
+            List of Dicts with "text" and "boxes"
+        """
+        from torchvision import transforms
+        ve_size = self.model.vision_encoder.image_size
+        transform = transforms.Compose([
+            transforms.Resize((ve_size, ve_size)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
+        ])
+
+        text = texts[0] if texts else ""
+        if SPECIAL_TOKENS["image"] not in text:
+            if "<image>" in text:
+                text = text.replace("<image>", SPECIAL_TOKENS["image"])
+            else:
+                text = f"{SPECIAL_TOKENS['image']}\n{text}"
+
+        messages = [{"role": "user", "content": text}]
+        formatted = self.tokenizer.apply_chat_template(
+            messages, tokenize=True, add_generation_prompt=True,
+            return_tensors="pt",
+        )
+        prompt_ids = formatted["input_ids"].to(self.device)
+        prompt_mask = torch.ones_like(prompt_ids)
+
+        gen_config = GenerationConfig(
+            max_new_tokens=self.config.max_new_tokens,
+            do_sample=False,
+            pad_token_id=self.tokenizer.pad_token_id,
+            eos_token_id=self.tokenizer.eos_token_id,
+        )
+
         results = []
-        for img, txt in zip(images, texts):
-            results.append(self.predict(img, txt))
+        for i in range(0, len(images), batch_size):
+            batch_imgs = images[i:i + batch_size]
+            batch_orig_sizes = [img.size for img in batch_imgs]
+
+            pixel_values = torch.stack([transform(img) for img in batch_imgs]).to(self.device)
+            batch_ids = prompt_ids.expand(len(batch_imgs), -1).contiguous()
+            batch_mask = prompt_mask.expand(len(batch_imgs), -1).contiguous()
+
+            outputs = self.model.generate(
+                pixel_values=pixel_values,
+                input_ids=batch_ids,
+                attention_mask=batch_mask,
+                generation_config=gen_config,
+            )
+
+            full_ids = outputs.sequences if hasattr(outputs, "sequences") else outputs
+            for j, seq in enumerate(full_ids):
+                text_out = self.tokenizer.decode(seq, skip_special_tokens=False)
+                orig_w, orig_h = batch_orig_sizes[j]
+                boxes = self._parse_boxes(text_out, orig_w, orig_h)
+                results.append({"text": text_out, "boxes": boxes})
+
         return results
 
 

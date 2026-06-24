@@ -104,16 +104,24 @@ python train.py --action train \
 
 ### Benchmark / Evaluation
 ```bash
-# Evaluate trained model on COCO val set
+# Evaluate trained model on COCO val set (batched, ~8x faster)
 python evaluate.py \
   --model_dir ./outputs_coco \
   --data ./data/coco_detection/val.jsonl \
   --image_dir ./data/coco/val2017 \
+  --batch_size 8 \
   --max_samples 500 \
   --output ./results.json
 ```
 
 Outputs per-IoU-threshold metrics (AP@0.5, F1@0.75, etc.) plus mean AP, Precision, Recall, F1 across IoU 0.5:0.95.
+
+**Metrics explained:**
+- `AP` — mean Average Precision across IoU thresholds 0.50:0.05:0.95 (COCO primary)
+- `F1` — mean F1 across the same thresholds
+- `AP@0.50`, `F1@0.50` — metrics at IoU 0.5 (PASCAL VOC standard)
+- `AP@0.75`, `F1@0.75` — stricter IoU for precise localization
+- `AP@0.90`, `F1@0.90` — near-perfect localization
 
 ### RefCOCO+
 ```bash

@@ -136,6 +136,13 @@ def compute_coco_ap(
     return results
 
 
+def _resolve_image_path(image_path: str, image_dir: str) -> Optional[str]:
+    resolved = image_path if os.path.isabs(image_path) else os.path.join(image_dir, image_path)
+    if not os.path.exists(resolved):
+        resolved = os.path.join(image_dir, os.path.basename(image_path))
+    return resolved if os.path.exists(resolved) else None
+
+
 def run_benchmark(
     model,
     tokenizer,
@@ -143,14 +150,14 @@ def run_benchmark(
     image_dir: str,
     max_samples: Optional[int] = None,
     iou_threshold: float = 0.5,
+    batch_size: int = 8,
 ) -> Dict[str, float]:
     from .config import InferenceConfig
     from .inference import DetectionInferenceEngine
-    from .utils import parse_boxes_from_text, load_image
+    from .utils import parse_boxes_from_text
 
     inf_cfg = InferenceConfig(max_new_tokens=512)
     engine = DetectionInferenceEngine(model, tokenizer, inf_cfg)
-    device = next(model.parameters()).device
 
     pred_boxes_by_image = {}
     gt_boxes_by_image = {}
@@ -160,60 +167,86 @@ def run_benchmark(
 
     from PIL import Image
 
-    iterator = tqdm(range(len(dataset)), desc="Benchmark")
-    for i in iterator:
+    valid_indices = []
+    for i in range(len(dataset)):
         if max_samples and i >= max_samples:
             break
-
         raw = dataset.data[i]
         image_path = raw.get("image", "")
-        resolved = image_path if os.path.isabs(image_path) else os.path.join(image_dir, image_path)
-        if not os.path.exists(resolved):
-            resolved = os.path.join(image_dir, os.path.basename(image_path))
-        if not os.path.exists(resolved):
+        resolved = _resolve_image_path(image_path, image_dir)
+        if resolved is None:
             continue
-
-        image = Image.open(resolved).convert("RGB")
-
+        gt_text = None
         for conv in raw.get("conversations", []):
             if conv.get("from") in ("gpt", "assistant"):
                 gt_text = conv["value"]
                 break
-        else:
-            continue
+        if gt_text and parse_boxes_from_text(gt_text):
+            valid_indices.append(i)
 
-        gt_boxes = parse_boxes_from_text(gt_text)
-        if not gt_boxes:
-            continue
+    num_samples = len(valid_indices)
+    if max_samples:
+        num_samples = min(num_samples, max_samples)
+        valid_indices = valid_indices[:num_samples]
+
+    iterator = tqdm(range(0, num_samples, batch_size), desc="Benchmark")
+    for start_idx in iterator:
+        end_idx = min(start_idx + batch_size, num_samples)
+        batch_indices = valid_indices[start_idx:end_idx]
+
+        batch_images = []
+        batch_gt_boxes = []
+        batch_ids = []
+
+        for idx in batch_indices:
+            raw = dataset.data[idx]
+            resolved = _resolve_image_path(raw["image"], image_dir)
+            image = Image.open(resolved).convert("RGB")
+            batch_images.append(image)
+            batch_ids.append(idx)
+
+            gt_text = None
+            for conv in raw.get("conversations", []):
+                if conv.get("from") in ("gpt", "assistant"):
+                    gt_text = conv["value"]
+                    break
+            gt_boxes = parse_boxes_from_text(gt_text or "")
+            batch_gt_boxes.append(gt_boxes)
 
         human_text = ""
-        for conv in raw.get("conversations", []):
+        raw0 = dataset.data[valid_indices[0]]
+        for conv in raw0.get("conversations", []):
             if conv.get("from") in ("human", "user"):
                 human_text = conv["value"]
                 break
-
         prompt = _make_prompt(human_text)
-        result = engine.predict(image, prompt)
-        pred_boxes = result["boxes"]
-        img_id = i
 
-        pred_boxes_by_image[img_id] = pred_boxes
-        gt_boxes_by_image[img_id] = gt_boxes
+        batch_results = engine.predict_batch(
+            batch_images, [prompt] * len(batch_images), batch_size=len(batch_images)
+        )
 
-        if pred_boxes and gt_boxes:
-            box_ious = [compute_iou(p, g) for p in pred_boxes for g in gt_boxes]
-            all_ious.append(max(box_ious))
-            p, r, _ = compute_precision_recall(pred_boxes, gt_boxes, iou_threshold)
-            all_precisions.append(p)
-            all_recalls.append(r)
-        elif not pred_boxes and gt_boxes:
-            all_precisions.append(0.0)
-            all_recalls.append(0.0)
-        elif pred_boxes and not gt_boxes:
-            all_precisions.append(0.0)
-            all_recalls.append(0.0)
+        for j, result in enumerate(batch_results):
+            pred_boxes = result["boxes"]
+            gt_boxes = batch_gt_boxes[j]
+            img_id = batch_ids[j]
 
-        iterator.set_postfix({"samples": i + 1})
+            pred_boxes_by_image[img_id] = pred_boxes
+            gt_boxes_by_image[img_id] = gt_boxes
+
+            if pred_boxes and gt_boxes:
+                box_ious = [compute_iou(p, g) for p in pred_boxes for g in gt_boxes]
+                all_ious.append(max(box_ious))
+                p, r, _ = compute_precision_recall(pred_boxes, gt_boxes, iou_threshold)
+                all_precisions.append(p)
+                all_recalls.append(r)
+            elif not pred_boxes and gt_boxes:
+                all_precisions.append(0.0)
+                all_recalls.append(0.0)
+            elif pred_boxes and not gt_boxes:
+                all_precisions.append(0.0)
+                all_recalls.append(0.0)
+
+        iterator.set_postfix({"samples": min(end_idx, num_samples)})
 
     results = {
         "num_samples": len(all_precisions),
@@ -313,6 +346,7 @@ def benchmark_on_jsonl(
     jsonl_path: str,
     image_dir: str,
     max_samples: Optional[int] = None,
+    batch_size: int = 8,
 ) -> Dict[str, float]:
     from .dataset import DetectionDataset
     ds = DetectionDataset(
@@ -320,4 +354,4 @@ def benchmark_on_jsonl(
         image_dir=image_dir,
         tokenizer=tokenizer,
     )
-    return run_benchmark(model, tokenizer, ds, image_dir, max_samples=max_samples)
+    return run_benchmark(model, tokenizer, ds, image_dir, max_samples=max_samples, batch_size=batch_size)

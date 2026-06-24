@@ -58,6 +58,7 @@ def main():
     parser.add_argument("--image_dir", default="", help="Image directory")
     parser.add_argument("--max_samples", type=int, default=None, help="Limit samples")
     parser.add_argument("--iou_threshold", type=float, default=0.5, help="IoU threshold")
+    parser.add_argument("--batch_size", type=int, default=8, help="Batch size for faster eval")
     parser.add_argument("--output", default=None, help="Save results JSON")
     args = parser.parse_args()
 
@@ -82,6 +83,7 @@ def main():
         jsonl_path=args.data,
         image_dir=image_dir,
         max_samples=args.max_samples,
+        batch_size=args.batch_size,
     )
 
     print("\n=== Results ===")
