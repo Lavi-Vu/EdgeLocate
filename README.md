@@ -84,21 +84,13 @@ python infer.py \
 
 ### COCO Detection
 ```bash
-# Prepare training set (downloads COCO 2017 train)
+# Prepare train.jsonl and val.jsonl from COCO 2017
 python train.py --action prepare_coco \
   --image_dir ./data/coco \
   --output_dir ./data/coco_detection \
-  --splits train \
-  --max_train 50000
+  --max_train 50000 --max_val 1000
 
-# Prepare validation set for evaluation
-python train.py --action prepare_coco \
-  --image_dir ./data/coco \
-  --output_dir ./data/coco_detection \
-  --splits val \
-  --no-download
-
-# Train on COCO detection (50k images, multiple objects per image)
+# Train on COCO detection (50k images)
 python train.py --action train \
   --train_data_path ./data/coco_detection/train.jsonl \
   --image_dir ./data/coco/train2017 \

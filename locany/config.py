@@ -104,7 +104,7 @@ def load_data_recipe(path: str) -> Dict:
     return {}
 
 
-def parse_args() -> Tuple[ModelConfig, TrainingConfig, DataConfig, InferenceConfig, str, bool, List[str], Optional[int], Optional[int]]:
+def parse_args() -> Tuple[ModelConfig, TrainingConfig, DataConfig, InferenceConfig, str, bool, Optional[int], Optional[int]]:
     parser = argparse.ArgumentParser(
         description="LocateAnything PBD Training/Inference",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -173,7 +173,6 @@ def parse_args() -> Tuple[ModelConfig, TrainingConfig, DataConfig, InferenceConf
     parser.add_argument("--num_samples", type=int, default=100, help="Number of samples for create_sample action")
     parser.add_argument("--max_boxes_per_image", type=int, default=8, help="Max boxes per image for create_sample")
     parser.add_argument("--no-download", action="store_true", help="Skip download for prepare actions")
-    parser.add_argument("--splits", nargs="+", default=["train", "val"], help="Splits for prepare actions")
     parser.add_argument("--max_train", type=int, default=None, help="Max train images for prepare_coco")
     parser.add_argument("--max_val", type=int, default=None, help="Max val images for prepare_coco")
 
@@ -240,4 +239,4 @@ def parse_args() -> Tuple[ModelConfig, TrainingConfig, DataConfig, InferenceConf
         top_p=args.top_p,
     )
 
-    return model_cfg, train_cfg, data_cfg, infer_cfg, args.action, args.no_download, args.splits, args.max_train, args.max_val
+    return model_cfg, train_cfg, data_cfg, infer_cfg, args.action, args.no_download, args.max_train, args.max_val

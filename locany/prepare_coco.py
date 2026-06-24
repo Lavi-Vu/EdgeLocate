@@ -234,18 +234,19 @@ def prepare(
     coco_root: str = "./data/coco",
     output_dir: str = "./data/coco_detection",
     year: str = "2017",
-    splits: Tuple[str, str] = ("train", "val"),
     max_images_per_split: Optional[Dict[str, int]] = None,
     max_boxes_per_image: int = 50,
     download: bool = True,
 ):
     """End-to-end: download COCO + convert to JSONL.
 
+    Automatically detects available splits from annotation files
+    (instances_train{year}.json, instances_val{year}.json, etc.).
+
     Args:
         coco_root: Where COCO images live/will be downloaded
         output_dir: Where to write JSONL files
         year: 2017 or 2014
-        splits: Which splits to process
         max_images_per_split: e.g. {"train": 50000, "val": 1000}
         max_boxes_per_image: Cap boxes per sample
         download: Auto-download missing data
@@ -261,13 +262,18 @@ def prepare(
     if max_images_per_split is None:
         max_images_per_split = {}
 
-    for split in splits:
-        ann_path = os.path.join(ann_dir, f"instances_{split}{year}.json")
-        if not os.path.exists(ann_path):
-            logger.warning(f"Annotations not found: {ann_path}")
-            continue
+    import glob as glob_mod
+    pattern = os.path.join(ann_dir, f"instances_*{year}.json")
+    ann_files = sorted(glob_mod.glob(pattern))
+    if not ann_files:
+        logger.error(f"No annotation files found matching {pattern}")
+        return
 
+    for ann_path in ann_files:
+        fname = os.path.basename(ann_path)
+        split = fname.replace(f"instances_", "").replace(f"{year}.json", "")
         out_path = os.path.join(output_dir, f"{split}.jsonl")
+        logger.info(f"Processing {fname} -> {out_path}")
         convert_coco_to_jsonl(
             ann_path=ann_path,
             coco_root=coco_root,
