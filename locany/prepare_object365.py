@@ -28,7 +28,7 @@ from tqdm import tqdm
 from .utils import logger
 
 ANN_URLS = {
-    "train": "https://dorc.ks3-cn-beijing.ksyun.com/data-set/2020Objects365%E6%95%B0%E6%8D%AE%E9%9B%86/train/zhiyuan_objv2_train.json",
+    "train": "https://dorc.ks3-cn-beijing.ksyun.com/data-set/2020Objects365%E6%95%B0%E6%8D%AE%E9%9B%86/train/zhiyuan_objv2_train.tar.gz",
     "val": "https://dorc.ks3-cn-beijing.ksyun.com/data-set/2020Objects365%E6%95%B0%E6%8D%AE%E9%9B%86/val/zhiyuan_objv2_val.json",
 }
 
@@ -48,18 +48,25 @@ ANN_FILES = {
 }
 
 
-def download_file(url: str, dest: str, desc: str = ""):
-    """Download a file with wget if not exists."""
-    if os.path.exists(dest):
-        return
+def _try_download(url: str, dest: str, desc: str = ""):
+    """Download a file using wget or curl. Returns True on success."""
     os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
+    if os.path.exists(dest):
+        return True
     logger.info(f"Downloading {desc or os.path.basename(dest)} ...")
-    subprocess.run(
-        ["wget", "-O", dest, url],
-        check=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    if subprocess.run(
+        ["wget", "-q", "--show-progress", "-O", dest, url],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    ).returncode == 0:
+        return True
+    if subprocess.run(
+        ["curl", "-fSL", "-o", dest, url],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    ).returncode == 0:
+        return True
+    if os.path.exists(dest):
+        os.remove(dest)
+    return False
 
 
 def download_annotations(output_dir: str, splits: Tuple[str, ...] = ("train", "val")) -> str:
@@ -70,9 +77,28 @@ def download_annotations(output_dir: str, splits: Tuple[str, ...] = ("train", "v
         url = ANN_URLS.get(split)
         if not url:
             continue
-        fname = ANN_FILES[split]
-        dest = os.path.join(ann_dir, fname)
-        download_file(url, dest, desc=f"Objects365 {split} annotations")
+        json_name = ANN_FILES[split]
+        json_dest = os.path.join(ann_dir, json_name)
+        if os.path.exists(json_dest):
+            continue
+
+        if split == "train":
+            # Train annotations come as a tarball
+            tarball = os.path.join(output_dir, "zhiyuan_objv2_train.tar.gz")
+            if not _try_download(url, tarball, desc="Objects365 train annotations (tarball)"):
+                logger.warning(f"Failed to download train annotations from {url}")
+                logger.info("See README for alternative download methods.")
+                continue
+            logger.info("  Extracting train annotations ...")
+            with tarfile.open(tarball) as tar:
+                tar.extractall(path=ann_dir)
+            os.remove(tarball)
+        else:
+            # Val annotations are a raw JSON
+            if not _try_download(url, json_dest, desc=f"Objects365 {split} annotations"):
+                logger.warning(f"Failed to download {split} annotations from {url}")
+                continue
+
     return ann_dir
 
 
@@ -105,7 +131,9 @@ def download_images(objects_root: str, split: str, max_patches: Optional[int] = 
 
         tarball = os.path.join(objects_root, f"{split}_{patch_name}.tar.gz")
         try:
-            download_file(url, tarball, desc=f"Objects365 {split} {patch_name}")
+            if not _try_download(url, tarball, desc=f"Objects365 {split} {patch_name}"):
+                logger.warning(f"  Failed to download {patch_name}")
+                continue
             logger.info(f"  Extracting {patch_name} ...")
             os.makedirs(patch_dir, exist_ok=True)
             with tarfile.open(tarball) as tar:
