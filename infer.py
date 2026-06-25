@@ -15,6 +15,7 @@ from locany import (
     load_model_from_dir,
     DetectionInferenceEngine,
     visualize_boxes,
+    parse_labels_and_boxes,
     LOCANY_SPECIAL_TOKENS,
     SPECIAL_TOKENS,
 )
@@ -79,7 +80,9 @@ def main():
 
     if args.output or not args.output:
         output_path = args.output or f"output_{os.path.splitext(os.path.basename(args.image))[0]}.png"
-        vis = visualize_boxes(image.copy(), result["boxes"], output_path=output_path)
+        label_boxes = parse_labels_and_boxes(result["text"])
+        labels = [lb[0] for lb in label_boxes]
+        vis = visualize_boxes(image.copy(), result["boxes"], labels=labels, output_path=output_path)
         print(f"Visualization saved to {output_path}")
 
 

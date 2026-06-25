@@ -2,7 +2,7 @@ import re
 from typing import Dict, List, Optional, Tuple
 
 import torch
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 from transformers import GenerationConfig
 
 from .config import InferenceConfig, ModelConfig
@@ -190,13 +190,24 @@ class DetectionInferenceEngine:
 def visualize_boxes(
     image: Image.Image,
     boxes: List[List[float]],
+    labels: Optional[List[str]] = None,
     output_path: Optional[str] = None,
 ) -> Image.Image:
-    """Draw boxes on image. Boxes are in original image pixel coordinates."""
+    """Draw boxes and optional labels on image. Boxes are in original pixel coords."""
     draw = ImageDraw.Draw(image)
-    for box in boxes:
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 16)
+    except (OSError, IOError):
+        font = ImageFont.load_default()
+    for i, box in enumerate(boxes):
         x1, y1, x2, y2 = map(int, box)
         draw.rectangle([x1, y1, x2, y2], outline="red", width=3)
+        if labels and i < len(labels) and labels[i]:
+            label = labels[i]
+            bbox = draw.textbbox((0, 0), label, font=font)
+            tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+            draw.rectangle([x1, y1 - th - 4, x1 + tw + 4, y1], fill="red")
+            draw.text((x1 + 2, y1 - th - 2), label, fill="white", font=font)
     if output_path:
         image.save(output_path)
     return image

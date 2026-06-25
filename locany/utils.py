@@ -85,6 +85,37 @@ def parse_boxes_from_text(text: str) -> List[List[float]]:
     return boxes
 
 
+def parse_labels_and_boxes(text: str) -> List[Tuple[str, List[float]]]:
+    """Extract (label, [x1,y1,x2,y2]) pairs from generated text.
+
+    Handles both correct (<ref>label</ref><box>...)
+    and malformed (<ref>label<box>... without </ref>) formats.
+    """
+    boxes_map = {}  # box_tuple -> label (prefers non-empty label)
+
+    def add(label, box):
+        key = tuple(box)
+        if key not in boxes_map or not boxes_map[key]:
+            boxes_map[key] = label
+
+    # Pattern 1: <ref>label</ref><box><d><d><d><d></box>
+    for m in re.finditer(r"<ref>([^<]*)</ref><box><(\d+)><(\d+)><(\d+)><(\d+)></box>", text):
+        add(m.group(1), [int(g) for g in m.groups()[1:]])
+    # Pattern 2: <ref>label<box><d><d><d><d></box> (no </ref>, e.g. model generation)
+    for m in re.finditer(r"<ref>([^<]*)<box><(\d+)><(\d+)><(\d+)><(\d+)></box>", text):
+        add(m.group(1), [int(g) for g in m.groups()[1:]])
+    # Pattern 3: <ref>label<d+><d+><d+><d+>... (malformed, missing </ref><box> and <box>)
+    for m in re.finditer(r"<ref>([^<]*)((?:<\d+>)+)(?:</box>|$)", text):
+        coords = [int(x.group(1)) for x in re.finditer(r"<(\d+)>", m.group(2))]
+        for i in range(0, len(coords) - len(coords) % 4, 4):
+            add(m.group(1), coords[i:i+4])
+    # Pattern 4: standalone boxes without ref
+    for m in re.finditer(r"<box><(\d+)><(\d+)><(\d+)><(\d+)></box>", text):
+        add("", [int(g) for g in m.groups()])
+
+    return [(boxes_map[k], list(k)) for k in boxes_map]
+
+
 def set_seed(seed: int):
     random.seed(seed)
     np.random.seed(seed)
