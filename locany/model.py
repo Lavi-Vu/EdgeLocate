@@ -487,6 +487,28 @@ def create_model(config: ModelConfig) -> LocateAnythingForDetection:
     return model
 
 
+def _safe_load_state_dict(model, state_dict: dict, label: str = ""):
+    """Load state_dict, skipping size-mismatched keys with a warning."""
+    model_state = model.state_dict()
+    to_load = {}
+    skipped = []
+    for k, v in state_dict.items():
+        if k in model_state:
+            if isinstance(v, torch.Tensor) and v.shape == model_state[k].shape:
+                to_load[k] = v
+            elif isinstance(v, torch.Tensor):
+                skipped.append(f"{k}: checkpoint {list(v.shape)} vs model {list(model_state[k].shape)}")
+            else:
+                to_load[k] = v
+        else:
+            to_load[k] = v
+    if skipped:
+        logger.warning(f"Skipped {len(skipped)} size-mismatched keys {label}:")
+        for s in skipped:
+            logger.warning(f"  {s}")
+    model.load_state_dict(to_load, strict=False)
+
+
 def load_model_from_dir(model_dir: str, tokenizer) -> LocateAnythingForDetection:
     """Load a saved model from directory.
 
@@ -534,7 +556,7 @@ def load_model_from_dir(model_dir: str, tokenizer) -> LocateAnythingForDetection
                 fixed_state[k.replace("llm.base_model.model.", "llm.")] = v
             else:
                 fixed_state[k] = v
-        model.load_state_dict(fixed_state, strict=False)
+        _safe_load_state_dict(model, fixed_state, label=f"from {non_llm_path}")
         logger.info(f"Loaded non-LoRA weights from {non_llm_path}")
     else:
         # Try full model.safetensors (legacy format)
@@ -542,7 +564,7 @@ def load_model_from_dir(model_dir: str, tokenizer) -> LocateAnythingForDetection
         if os.path.exists(full_path):
             from safetensors.torch import load_file
             state_dict = load_file(full_path)
-            model.load_state_dict(state_dict, strict=False)
+            _safe_load_state_dict(model, state_dict, label=f"from {full_path}")
             logger.info(f"Loaded full model from {full_path}")
 
     return model
