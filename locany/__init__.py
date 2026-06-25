@@ -8,6 +8,7 @@ from .utils import set_seed, ensure_dir, get_model_size, load_image, SPECIAL_TOK
 from .create_sample_data import create_sample_dataset
 from .prepare_refcoco import prepare as prepare_refcoco
 from .prepare_coco import prepare as prepare_coco
+from .prepare_object365 import prepare as prepare_object365
 
 __all__ = [
     "ModelConfig",
@@ -39,4 +40,5 @@ __all__ = [
     "create_sample_dataset",
     "prepare_refcoco",
     "prepare_coco",
+    "prepare_object365",
 ]

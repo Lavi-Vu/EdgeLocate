@@ -31,6 +31,7 @@ from locany import (
     create_sample_dataset,
     prepare_refcoco,
     prepare_coco,
+    prepare_object365,
     set_seed,
     get_model_size,
     load_image,
@@ -282,6 +283,18 @@ def main():
             output_dir=train_cfg.output_dir,
             max_images_per_split=max_images_per_split or None,
             download=not no_download,
+        )
+    elif action == "prepare_object365":
+        prepare_object365(
+            objects_root=args.objects_root,
+            output_dir=train_cfg.output_dir,
+            splits=args.splits,
+            max_train=args.max_train,
+            max_val=args.max_val,
+            max_boxes_per_image=args.max_boxes,
+            download=not no_download,
+            download_images_flag=not args.no_download_images,
+            max_patches=args.max_patches,
         )
     else:
         logger.error(f"Unknown action: {action}")

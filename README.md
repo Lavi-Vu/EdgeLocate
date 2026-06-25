@@ -187,6 +187,36 @@ python train.py --action train \
   --lora_r 64
 ```
 
+### Object365 Dataset (Large-Scale Detection)
+
+Objects365 v2 contains **365 categories** with ~2M images and ~30M bounding boxes. Good for pretraining on diverse real-world objects.
+
+```bash
+# Prepare Objects365 (requires ~180GB for full dataset)
+python train.py --action prepare_object365 \
+  --objects_root ./data/objects365 \
+  --output_dir ./data/objects365_detection \
+  --max_train 50000 --max_val 5000 \
+  --max_patches 10
+
+# Train on Objects365 detection
+python train.py --action train \
+  --train_data_path ./data/objects365_detection/train.jsonl \
+  --image_dir ./data/objects365/images/train \
+  --output_dir ./outputs_o365 \
+  --num_epochs 5 \
+  --per_device_batch_size 1 \
+  --gradient_accumulation_steps 8 \
+  --learning_rate 3e-5 \
+  --lora_r 64
+```
+
+**Notes:**
+- Images come in 51 train patches (patch0–patch50) and 43 val patches (patch0–patch42), extracted from tar.gz archives
+- Official KS3 download URLs can be slow outside China; consider OpenDataLab mirrors
+- `--no-download-images` skips image download (use with pre-downloaded images)
+- `--max-patches N` limits download for testing (e.g. `--max-patches 2` = only 2 patches per split)
+
 ### Inference (via `train.py`)
 ```bash
 python train.py --action inference \
@@ -296,8 +326,17 @@ Prepare (COCO):
   --image_dir, --output_dir
   --max_train, --max_val, --no-download
 
+Prepare (Objects365):
+  --objects_root              Objects365 data directory (default: ./data/objects365)
+  --output_dir                Output directory (default: ./data/objects365_detection)
+  --splits                    Splits to process (default: train val)
+  --max_train, --max_val      Limit images per split
+  --no-download               Skip annotation download
+  --no-download-images        Skip image download
+  --max-patches               Limit patches downloaded per split
+
 Actions:
-  --action {train,inference,eval,create_sample,prepare_refcoco,prepare_coco}
+  --action {train,inference,eval,create_sample,prepare_refcoco,prepare_coco,prepare_object365}
 ```
 
 ## Requirements

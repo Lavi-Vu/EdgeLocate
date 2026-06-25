@@ -184,8 +184,13 @@ def parse_args():
     parser.add_argument("--num_val", type=int, default=None, help="Max val samples per variant (prepare_refcoco)")
     parser.add_argument("--no-combine", action="store_true", help="Skip combining variants (prepare_refcoco)")
 
+    # Objects365 args
+    parser.add_argument("--objects_root", default="./data/objects365", help="Objects365 data directory")
+    parser.add_argument("--no-download-images", action="store_true", help="Skip image download (prepare_object365)")
+    parser.add_argument("--max-patches", type=int, default=None, help="Limit patches per split (prepare_object365)")
+
     # Action mode
-    parser.add_argument("--action", default="train", choices=["train", "inference", "eval", "create_sample", "prepare_refcoco", "prepare_coco"],
+    parser.add_argument("--action", default="train", choices=["train", "inference", "eval", "create_sample", "prepare_refcoco", "prepare_coco", "prepare_object365"],
                         help="Action to perform")
 
     args = parser.parse_args()
