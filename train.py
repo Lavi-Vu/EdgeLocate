@@ -6,6 +6,7 @@ Uses the standard VLM approach (VE → Projector → LLM+LoRA → LM head)
 with box coordinates predicted as discrete tokens <0>–<1000> via cross-entropy loss.
 """
 
+import json
 import logging
 import os
 import sys
@@ -33,6 +34,7 @@ from locany import (
     set_seed,
     get_model_size,
     load_image,
+    load_data_recipe,
 )
 
 for h in logging.root.handlers[:]:
@@ -96,22 +98,31 @@ def run_training(
     ve_image_size = model.vision_encoder.image_size
     train_image_size = (ve_image_size, ve_image_size)
 
+    data_recipe = load_data_recipe(data_cfg.data_recipe) if data_cfg.data_recipe else None
+
     train_dataset = DetectionDataset(
         data_path=data_cfg.train_data_path,
         image_dir=data_cfg.image_dir,
         tokenizer=tokenizer,
         max_length=data_cfg.max_length,
         image_size=train_image_size,
+        data_recipe=data_recipe,
     )
 
     eval_dataset = None
+    eval_recipe = None
     if data_cfg.eval_data_path:
+        eval_recipe_path = data_cfg.eval_data_path if data_cfg.eval_data_path.endswith(".json") else None
+        if eval_recipe_path and os.path.exists(eval_recipe_path):
+            with open(eval_recipe_path) as f:
+                eval_recipe = json.load(f)
         eval_dataset = DetectionDataset(
-            data_path=data_cfg.eval_data_path,
+            data_path=data_cfg.eval_data_path if not eval_recipe else "",
             image_dir=data_cfg.image_dir,
             tokenizer=tokenizer,
             max_length=data_cfg.max_length,
             image_size=train_image_size,
+            data_recipe=eval_recipe,
         )
 
     trainer = setup_training(
@@ -209,12 +220,14 @@ def run_evaluation(
     model = model.to(device)
 
     ve_image_size = model.vision_encoder.image_size
+    eval_data_recipe = load_data_recipe(data_cfg.data_recipe) if data_cfg.data_recipe else None
     eval_dataset = DetectionDataset(
         data_path=data_cfg.eval_data_path or data_cfg.train_data_path,
         image_dir=data_cfg.image_dir,
         tokenizer=tokenizer,
         max_length=data_cfg.max_length,
         image_size=(ve_image_size, ve_image_size),
+        data_recipe=eval_data_recipe,
     )
 
     results = evaluate_model(model, tokenizer, eval_dataset, max_samples=50)

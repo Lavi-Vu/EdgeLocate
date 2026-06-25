@@ -4,7 +4,7 @@ import random
 from typing import Dict, List, Optional, Tuple
 
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, WeightedRandomSampler, ConcatDataset
 from PIL import Image
 
 from .config import DataConfig
@@ -25,6 +25,7 @@ def parse_sharegpt_line(
     tokenizer,
     max_length: int = 2048,
     image_size: Tuple[int, int] = (224, 224),
+    data_augment: bool = False,
 ) -> Optional[Dict]:
     """Parse a JSON line into model inputs with discrete coordinate tokens.
 
@@ -99,7 +100,21 @@ def parse_sharegpt_line(
         return None
 
     try:
-        image = load_image(resolved, size=image_size)
+        use_size = image_size
+        # Data augmentation: random scale crop for robustness
+        if data_augment:
+            import random as _r
+            scale = _r.uniform(0.8, 1.0)
+            ih = int(image_size[0] * scale)
+            iw = int(image_size[1] * scale)
+            image = load_image(resolved, size=(ih, iw))
+            from torchvision import transforms as T
+            image = T.Compose([
+                T.Resize(image_size),
+                T.RandomCrop(image_size),
+            ])(image)
+        else:
+            image = load_image(resolved, size=image_size)
     except Exception as e:
         logger.warning(f"Failed to load image {resolved}: {e}")
         return None
@@ -159,42 +174,28 @@ def parse_sharegpt_line(
     }
 
 
-class DetectionDataset(Dataset):
-    """Dataset for detection training from JSONL file."""
+class _SubDataset(Dataset):
+    """Internal wrapper holding one dataset's lines and config."""
 
-    def __init__(
-        self,
-        data_path: str,
-        image_dir: str,
-        tokenizer,
-        max_length: int = 2048,
-        image_size: Tuple[int, int] = (224, 224),
-    ):
+    def __init__(self, data_lines: List[Dict], image_dir: str, tokenizer, max_length: int,
+                 image_size: Tuple[int, int], data_augment: bool):
+        self.data = data_lines
+        self.image_dir = image_dir
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.image_size = image_size
-        self.image_dir = image_dir
+        self.data_augment = data_augment
 
-        self.data = []
-        if data_path:
-            with open(data_path) as f:
-                for line in f:
-                    line = line.strip()
-                    if line:
-                        self.data.append(json.loads(line))
-            logger.info(f"Loaded {len(self.data)} samples from {data_path}")
-        else:
-            logger.warning("No data path provided")
-
-    def __len__(self) -> int:
+    def __len__(self):
         return len(self.data)
 
-    def __getitem__(self, idx: int) -> Dict:
+    def __getitem__(self, idx):
         for attempt in range(5):
             line = self.data[idx]
             parsed = parse_sharegpt_line(
                 line, self.image_dir, self.tokenizer,
                 self.max_length, self.image_size,
+                data_augment=self.data_augment,
             )
             if parsed is not None:
                 break
@@ -215,3 +216,83 @@ class DetectionDataset(Dataset):
             "attention_mask": torch.tensor(parsed["attention_mask"], dtype=torch.long),
             "labels": torch.tensor(parsed["labels"], dtype=torch.long),
         }
+
+
+class DetectionDataset(Dataset):
+    """Multi-dataset detection training dataset supporting data recipes.
+
+    Supports:
+      - Single JSONL via data_path/image_dir
+      - Data recipe JSON via data_recipe (dict or path) with per-dataset:
+          annotation: str (path to JSONL)
+          root: str (image directory)
+          repeat_time: float (relative sampling weight)
+          data_augment: bool (random scale crop)
+    """
+
+    def __init__(
+        self,
+        data_path: str = "",
+        image_dir: str = "",
+        tokenizer=None,
+        max_length: int = 2048,
+        image_size: Tuple[int, int] = (224, 224),
+        data_recipe: Optional[Dict] = None,
+    ):
+        self.tokenizer = tokenizer
+        self.max_length = max_length
+        self.image_size = image_size
+
+        datasets = []
+
+        # Load from recipe
+        if data_recipe:
+            for name, cfg in data_recipe.items():
+                ann = cfg.get("annotation", "")
+                root = cfg.get("root", "")
+                repeat = float(cfg.get("repeat_time", 1.0))
+                augment = bool(cfg.get("data_augment", False))
+                if not ann or not os.path.exists(ann):
+                    logger.warning(f"Recipe '{name}': annotation not found at {ann}, skipping")
+                    continue
+                lines = []
+                with open(ann) as f:
+                    for line in f:
+                        line = line.strip()
+                        if line:
+                            lines.append(json.loads(line))
+                logger.info(f"Recipe '{name}': {len(lines)} samples, root={root}, "
+                            f"repeat={repeat}, augment={augment}")
+                sub = _SubDataset(lines, root, tokenizer, max_length, image_size, augment)
+                if repeat > 1:
+                    datasets.append(ConcatDataset([sub] * int(repeat)))
+                elif repeat > 0:
+                    datasets.append(sub)
+
+        # Load single JSONL (legacy path)
+        if data_path and os.path.exists(data_path):
+            lines = []
+            with open(data_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        lines.append(json.loads(line))
+            logger.info(f"Loaded {len(lines)} samples from {data_path} (legacy path)")
+            sub = _SubDataset(lines, image_dir, tokenizer, max_length, image_size, False)
+            datasets.append(sub)
+        elif data_path and not data_recipe:
+            logger.warning(f"Data path not found: {data_path}")
+
+        if not datasets:
+            logger.warning("No data loaded!")
+            self.dataset = None
+        elif len(datasets) == 1:
+            self.dataset = datasets[0]
+        else:
+            self.dataset = ConcatDataset(datasets)
+
+    def __len__(self) -> int:
+        return len(self.dataset) if self.dataset is not None else 0
+
+    def __getitem__(self, idx: int) -> Dict:
+        return self.dataset[idx]

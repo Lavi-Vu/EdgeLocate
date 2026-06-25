@@ -1,4 +1,4 @@
-from .config import ModelConfig, TrainingConfig, DataConfig, InferenceConfig, parse_args, load_data_recipe
+from .config import ModelConfig, TrainingConfig, DataConfig, InferenceConfig, parse_args, load_data_recipe as load_data_recipe
 from .model import LocateAnythingForDetection, create_model, load_model_from_dir
 from .dataset import DetectionDataset as DetectionDataset, parse_sharegpt_line
 from .training import setup_training, save_model
@@ -35,6 +35,7 @@ __all__ = [
     "SPECIAL_TOKENS",
     "boxes_to_tokens",
     "parse_boxes_from_text",
+    "parse_labels_and_boxes",
     "create_sample_dataset",
     "prepare_refcoco",
     "prepare_coco",

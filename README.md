@@ -103,6 +103,51 @@ python train.py --action train \
   --lora_r 64
 ```
 
+### Multi-Dataset Training (Data Recipe)
+
+Train on multiple datasets simultaneously with per-dataset sampling weights and augmentation:
+
+```bash
+# Prepare RefCOCO/+/g
+python train.py --action prepare_refcoco --coco_root ./data/coco --output_dir ./data/refcoco
+
+# Prepare COCO detection
+python train.py --action prepare_coco --image_dir ./data/coco --output_dir ./data/coco_detection
+
+# Create a recipe JSON
+cat > recipe.json << 'EOF'
+{
+    "refcoco": {
+        "annotation": "data/refcoco/train.jsonl",
+        "root": "data/coco/train2014",
+        "repeat_time": 1.0,
+        "data_augment": true
+    },
+    "detection_coco": {
+        "annotation": "data/coco_detection/train.jsonl",
+        "root": "data/coco/train2017",
+        "repeat_time": 2.0,
+        "data_augment": true
+    }
+}
+EOF
+
+# Train on both datasets (recipe overrides --train_data_path)
+python train.py --action train \
+  --data_recipe recipe.json \
+  --output_dir ./outputs_multi \
+  --num_epochs 5 \
+  --per_device_batch_size 1 \
+  --gradient_accumulation_steps 8 \
+  --learning_rate 3e-5
+```
+
+**Recipe fields:**
+- `annotation` — path to JSONL file
+- `root` — image root directory
+- `repeat_time` — relative sampling weight (e.g. `2.0` = sampled twice as often)
+- `data_augment` — enables random scale-crop augmentation per sample
+
 ### Benchmark / Evaluation
 ```bash
 # Evaluate trained model on COCO val set (batched, ~8x faster)
@@ -124,17 +169,17 @@ Outputs per-IoU-threshold metrics (AP@0.5, F1@0.75, etc.) plus mean AP, Precisio
 - `AP@0.75`, `F1@0.75` — stricter IoU for precise localization
 - `AP@0.90`, `F1@0.90` — near-perfect localization
 
-### RefCOCO+
+### RefCOCO/+/g (Referring Expression Comprehension)
 ```bash
-# Prepare dataset (downloads COCO + refcoco+ annotations)
+# Download all three RefCOCO variants from HuggingFace and combine into train/val
 python train.py --action prepare_refcoco \
-  --image_dir ./data/coco \
-  --output_dir ./data/refcoco_plus
+  --coco_root ./data/coco \
+  --output_dir ./data/refcoco
 
-# Train on refcoco+ (referring expression comprehension)
+# Train on combined RefCOCO/+/g (referring expression comprehension)
 python train.py --action train \
-  --train_data_path ./data/refcoco_plus/train.jsonl \
-  --image_dir ./data/coco \
+  --train_data_path ./data/refcoco/train.jsonl \
+  --image_dir ./data/coco/train2014 \
   --output_dir ./outputs_refcoco \
   --num_epochs 10 \
   --per_device_batch_size 1 \
@@ -199,9 +244,11 @@ engine = DetectionInferenceEngine(model, tokenizer, InferenceConfig())
 result = engine.predict(image, "Locate all the instances that matches the following description: all objects.")
 print(result["boxes"])  # [[x1, y1, x2, y2], ...] in original image pixel coords
 
-# Visualize
-from locany import visualize_boxes
-visualize_boxes(image, result["boxes"], output_path="output.png")
+# Visualize (with labels)
+from locany import visualize_boxes, parse_labels_and_boxes
+label_boxes = parse_labels_and_boxes(result["text"])
+labels = [lb[0] for lb in label_boxes]
+visualize_boxes(image, result["boxes"], labels=labels, output_path="output.png")
 ```
 
 ## All CLI Options
@@ -234,10 +281,20 @@ Training:
 
 Data:
   --train_data_path, --eval_data_path, --image_dir
+  --data_recipe                  Path to multi-dataset recipe JSON
   --max_length
 
 Inference:
   --max_new_tokens, --temperature, --top_p
+
+Prepare (RefCOCO):
+  --coco_root, --ann_dir, --output_dir
+  --splits, --num_train, --num_val
+  --no-download, --no-combine
+
+Prepare (COCO):
+  --image_dir, --output_dir
+  --max_train, --max_val, --no-download
 
 Actions:
   --action {train,inference,eval,create_sample,prepare_refcoco,prepare_coco}
