@@ -104,7 +104,7 @@ def load_data_recipe(path: str) -> Dict:
     return {}
 
 
-def parse_args() -> Tuple[ModelConfig, TrainingConfig, DataConfig, InferenceConfig, str, bool, Optional[int], Optional[int]]:
+def parse_args():
     parser = argparse.ArgumentParser(
         description="LocateAnything PBD Training/Inference",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -176,6 +176,14 @@ def parse_args() -> Tuple[ModelConfig, TrainingConfig, DataConfig, InferenceConf
     parser.add_argument("--max_train", type=int, default=None, help="Max train images for prepare_coco")
     parser.add_argument("--max_val", type=int, default=None, help="Max val images for prepare_coco")
 
+    # Prepare args
+    parser.add_argument("--coco_root", default="./data/coco", help="COCO image directory (prepare_refcoco)")
+    parser.add_argument("--ann_dir", default="", help="Pre-downloaded annotation directory (prepare_refcoco)")
+    parser.add_argument("--splits", nargs="+", default=["train", "val"], help="Splits to process (prepare_refcoco)")
+    parser.add_argument("--num_train", type=int, default=None, help="Max train samples per variant (prepare_refcoco)")
+    parser.add_argument("--num_val", type=int, default=None, help="Max val samples per variant (prepare_refcoco)")
+    parser.add_argument("--no-combine", action="store_true", help="Skip combining variants (prepare_refcoco)")
+
     # Action mode
     parser.add_argument("--action", default="train", choices=["train", "inference", "eval", "create_sample", "prepare_refcoco", "prepare_coco"],
                         help="Action to perform")
@@ -239,4 +247,4 @@ def parse_args() -> Tuple[ModelConfig, TrainingConfig, DataConfig, InferenceConf
         top_p=args.top_p,
     )
 
-    return model_cfg, train_cfg, data_cfg, infer_cfg, args.action, args.no_download, args.max_train, args.max_val
+    return model_cfg, train_cfg, data_cfg, infer_cfg, args.action, args.no_download, args.max_train, args.max_val, args

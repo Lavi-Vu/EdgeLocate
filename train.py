@@ -237,7 +237,7 @@ def run_evaluation(
 
 
 def main():
-    model_cfg, train_cfg, data_cfg, infer_cfg, action, no_download, max_train, max_val = parse_args()
+    model_cfg, train_cfg, data_cfg, infer_cfg, action, no_download, max_train, max_val, args = parse_args()
 
     import sys
     extra_args = {}
@@ -262,9 +262,14 @@ def main():
         )
     elif action == "prepare_refcoco":
         prepare_refcoco(
-            coco_root=data_cfg.image_dir or "./data/coco",
+            coco_root=args.coco_root,
             output_dir=train_cfg.output_dir,
+            ann_dir=args.ann_dir,
+            splits=args.splits,
+            num_train=args.num_train,
+            num_val=args.num_val,
             download=not no_download,
+            combine=not args.no_combine,
         )
     elif action == "prepare_coco":
         max_images_per_split = {}
