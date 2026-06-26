@@ -79,8 +79,16 @@ def download_annotations(output_dir: str, splits: Tuple[str, ...] = ("train", "v
             continue
         json_name = ANN_FILES[split]
         json_dest = os.path.join(ann_dir, json_name)
-        if os.path.exists(json_dest):
-            continue
+
+        # Check if valid JSON already exists (skip download)
+        if os.path.exists(json_dest) and os.path.getsize(json_dest) > 0:
+            try:
+                with open(json_dest) as f:
+                    json.loads(f.read(1024))
+                continue
+            except (json.JSONDecodeError, Exception):
+                logger.warning(f"  {json_name} exists but is invalid, re-downloading")
+                os.remove(json_dest)
 
         if split == "train":
             # Train annotations come as a tarball
