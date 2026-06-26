@@ -151,19 +151,24 @@ def download_images(objects_root: str, split: str, max_patches: Optional[int] = 
             logger.warning(f"  Failed to download/extract {patch_name}: {e}")
 
 
-def resolve_image_path(image_dir: str, file_name: str) -> Optional[str]:
-    """Resolve image path from annotation file_name.
+def _build_image_index(image_dir: str) -> Dict[str, str]:
+    """Build a mapping from filename to full path (walk once)."""
+    index = {}
+    for root, _dirs, files in os.walk(image_dir):
+        for f in files:
+            index[f] = os.path.join(root, f)
+    return index
 
-    Objects365 file_name is like 'patch0/xxx.jpg'. We search for it
-    under each patch directory.
-    """
+
+def resolve_image_path(image_dir: str, file_name: str, index: Dict[str, str]) -> Optional[str]:
+    """Resolve image path using pre-built index."""
     path = os.path.join(image_dir, file_name)
     if os.path.exists(path):
         return os.path.abspath(path)
     basename = os.path.basename(file_name)
-    for root, _dirs, files in os.walk(image_dir):
-        if basename in files:
-            return os.path.join(root, basename)
+    full = index.get(basename)
+    if full:
+        return full
     return None
 
 
@@ -204,6 +209,10 @@ def convert_to_jsonl(
     written = 0
     skipped = 0
 
+    logger.info("Building image index (single walk) ...")
+    img_index = _build_image_index(image_dir)
+    logger.info(f"Indexed {len(img_index)} images")
+
     with open(output_path, "w") as out_f:
         for img in tqdm(images, desc=f"Objects365 {split} -> JSONL"):
             image_id = img["id"]
@@ -211,7 +220,7 @@ def convert_to_jsonl(
             if not fname:
                 continue
 
-            img_path = resolve_image_path(image_dir, fname)
+            img_path = resolve_image_path(image_dir, fname, img_index)
             if img_path is None:
                 skipped += 1
                 continue
