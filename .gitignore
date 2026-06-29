@@ -15,3 +15,4 @@ output*/
 test_*/
 __pycache__/
 __pycache__/*
+data/*
