@@ -25,6 +25,11 @@ class ModelConfig:
     lora_r: int = 128
     lora_alpha: int = 256
     lora_dropout: float = 0.05
+    use_backbone_lora: int = 0
+    mlp_connector_layers: int = 2
+    block_size: int = 6
+    generation_mode: str = "hybrid"
+    n_future_tokens: int = 6
 
     def to_dict(self) -> Dict:
         return {
@@ -46,6 +51,20 @@ class ModelConfig:
             "lora_r": self.lora_r,
             "lora_alpha": self.lora_alpha,
             "lora_dropout": self.lora_dropout,
+            "use_backbone_lora": self.use_backbone_lora,
+            "mlp_connector_layers": self.mlp_connector_layers,
+            "block_size": self.block_size,
+            "generation_mode": self.generation_mode,
+            "n_future_tokens": self.n_future_tokens,
+            "box_start_token_id": 151666,
+            "box_end_token_id": 151667,
+            "ref_start_token_id": 151668,
+            "ref_end_token_id": 151669,
+            "coord_start_token_id": 151670,
+            "coord_end_token_id": 151670 + 1000,
+            "none_token_id": 4064,
+            "null_token_id": 152671,
+            "im_end_token_id": 151645,
         }
 
     @staticmethod
@@ -75,6 +94,7 @@ class TrainingConfig:
     block_size: int = 2048
     packing: bool = False
     seed: int = 42
+    use_online_packing: bool = False
 
 
 @dataclass
@@ -89,12 +109,13 @@ class DataConfig:
 
 @dataclass
 class InferenceConfig:
-    mode: str = "fast"
+    mode: str = "hybrid"
     max_new_boxes: int = 32
     confidence_threshold: float = 0.0
     max_new_tokens: int = 512
     temperature: float = 0.0
     top_p: float = 1.0
+    keep_k_avg: int = 4
 
 
 def load_data_recipe(path: str) -> Dict:
@@ -106,17 +127,15 @@ def load_data_recipe(path: str) -> Dict:
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="LocateAnything PBD Training/Inference",
+        description="EdgeLocate PBD Training/Inference",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-
-    # Model args
     model_group = parser.add_argument_group("Model")
-    model_group.add_argument("--llm_model", default="Qwen/Qwen2.5-0.5B-Instruct", help="LLM backbone")
-    model_group.add_argument("--ve_model", default="google/siglip-base-patch16-224", help="Vision encoder")
+    model_group.add_argument("--llm_model", default="Qwen/Qwen2.5-0.5B-Instruct")
+    model_group.add_argument("--ve_model", default="google/siglip-base-patch16-224")
     model_group.add_argument("--ve_hidden_size", type=int, default=768)
     model_group.add_argument("--llm_hidden_size", type=int, default=896)
-    model_group.add_argument("--max_boxes", type=int, default=32, help="Maximum boxes per image")
+    model_group.add_argument("--max_boxes", type=int, default=32)
     model_group.add_argument("--freeze_llm", action="store_true", default=False)
     model_group.add_argument("--no-freeze_llm", action="store_false", dest="freeze_llm")
     model_group.add_argument("--freeze_vision_encoder", action="store_true", default=True)
@@ -125,12 +144,15 @@ def parse_args():
     model_group.add_argument("--vision_select_layer", type=int, default=-1)
     model_group.add_argument("--attn_implementation", default="sdpa", choices=["sdpa", "flash_attention_2", "eager"])
     model_group.add_argument("--torch_dtype", default="bfloat16", choices=["float32", "float16", "bfloat16"])
-    model_group.add_argument("--use_lora", action="store_true", default=True, help="Use LoRA on LLM")
+    model_group.add_argument("--use_lora", action="store_true", default=True)
     model_group.add_argument("--no-lora", action="store_false", dest="use_lora")
     model_group.add_argument("--lora_r", type=int, default=128)
     model_group.add_argument("--lora_alpha", type=int, default=256)
+    model_group.add_argument("--use_backbone_lora", type=int, default=0)
+    model_group.add_argument("--mlp_connector_layers", type=int, default=2)
+    model_group.add_argument("--block_size", type=int, default=6)
+    model_group.add_argument("--generation_mode", default="hybrid", choices=["fast", "hybrid", "slow"])
 
-    # Training args
     train_group = parser.add_argument_group("Training")
     train_group.add_argument("--output_dir", default="./outputs")
     train_group.add_argument("--num_epochs", type=int, default=3)
@@ -142,7 +164,7 @@ def parse_args():
     train_group.add_argument("--bf16", action="store_true", default=True)
     train_group.add_argument("--no-bf16", action="store_false", dest="bf16")
     train_group.add_argument("--gradient_checkpointing", action="store_true", default=True)
-    train_group.add_argument("--deepspeed", default=None, help="Path to DeepSpeed config JSON")
+    train_group.add_argument("--deepspeed", default=None)
     train_group.add_argument("--logging_steps", type=int, default=10)
     train_group.add_argument("--save_steps", type=int, default=500)
     train_group.add_argument("--eval_steps", type=int, default=500)
@@ -153,45 +175,38 @@ def parse_args():
     train_group.add_argument("--packing", action="store_true", default=False)
     train_group.add_argument("--seed", type=int, default=42)
 
-    # Data args
     data_group = parser.add_argument_group("Data")
-    data_group.add_argument("--train_data_path", default="", help="Path to training JSONL")
-    data_group.add_argument("--eval_data_path", default="", help="Path to eval JSONL")
-    data_group.add_argument("--image_dir", default="", help="Image directory")
-    data_group.add_argument("--data_recipe", default=None, help="Path to data recipe JSON")
+    data_group.add_argument("--train_data_path", default="")
+    data_group.add_argument("--eval_data_path", default="")
+    data_group.add_argument("--image_dir", default="")
+    data_group.add_argument("--data_recipe", default=None)
     data_group.add_argument("--max_length", type=int, default=2048)
 
-    # Inference args
     inf_group = parser.add_argument_group("Inference")
-    inf_group.add_argument("--mode", default="fast", choices=["fast", "hybrid", "slow"])
+    inf_group.add_argument("--mode", default="hybrid", choices=["fast", "hybrid", "slow"])
     inf_group.add_argument("--max_new_boxes", type=int, default=32)
     inf_group.add_argument("--confidence_threshold", type=float, default=0.0)
     inf_group.add_argument("--max_new_tokens", type=int, default=512)
     inf_group.add_argument("--temperature", type=float, default=0.0)
     inf_group.add_argument("--top_p", type=float, default=1.0)
+    inf_group.add_argument("--keep_k_avg", type=int, default=4)
 
-    parser.add_argument("--num_samples", type=int, default=100, help="Number of samples for create_sample action")
-    parser.add_argument("--max_boxes_per_image", type=int, default=8, help="Max boxes per image for create_sample")
-    parser.add_argument("--no-download", action="store_true", help="Skip download for prepare actions")
-    parser.add_argument("--max_train", type=int, default=None, help="Max train images for prepare_coco")
-    parser.add_argument("--max_val", type=int, default=None, help="Max val images for prepare_coco")
+    parser.add_argument("--num_samples", type=int, default=100)
+    parser.add_argument("--max_boxes_per_image", type=int, default=8)
+    parser.add_argument("--no-download", action="store_true")
+    parser.add_argument("--max_train", type=int, default=None)
+    parser.add_argument("--max_val", type=int, default=None)
+    parser.add_argument("--coco_root", default="./data/coco")
+    parser.add_argument("--ann_dir", default="")
+    parser.add_argument("--splits", nargs="+", default=["train", "val"])
+    parser.add_argument("--num_train", type=int, default=None)
+    parser.add_argument("--num_val", type=int, default=None)
+    parser.add_argument("--no-combine", action="store_true")
+    parser.add_argument("--objects_root", default="./data/objects365")
+    parser.add_argument("--no-download-images", action="store_true")
+    parser.add_argument("--max-patches", type=int, default=None)
 
-    # Prepare args
-    parser.add_argument("--coco_root", default="./data/coco", help="COCO image directory (prepare_refcoco)")
-    parser.add_argument("--ann_dir", default="", help="Pre-downloaded annotation directory (prepare_refcoco)")
-    parser.add_argument("--splits", nargs="+", default=["train", "val"], help="Splits to process (prepare_refcoco)")
-    parser.add_argument("--num_train", type=int, default=None, help="Max train samples per variant (prepare_refcoco)")
-    parser.add_argument("--num_val", type=int, default=None, help="Max val samples per variant (prepare_refcoco)")
-    parser.add_argument("--no-combine", action="store_true", help="Skip combining variants (prepare_refcoco)")
-
-    # Objects365 args
-    parser.add_argument("--objects_root", default="./data/objects365", help="Objects365 data directory")
-    parser.add_argument("--no-download-images", action="store_true", help="Skip image download (prepare_object365)")
-    parser.add_argument("--max-patches", type=int, default=None, help="Limit patches per split (prepare_object365)")
-
-    # Action mode
-    parser.add_argument("--action", default="train", choices=["train", "inference", "eval", "create_sample", "prepare_refcoco", "prepare_coco", "prepare_object365"],
-                        help="Action to perform")
+    parser.add_argument("--action", default="train", choices=["train", "inference", "eval", "create_sample", "prepare_refcoco", "prepare_coco", "prepare_object365"])
 
     args = parser.parse_args()
 
@@ -211,6 +226,10 @@ def parse_args():
         use_lora=args.use_lora,
         lora_r=args.lora_r,
         lora_alpha=args.lora_alpha,
+        use_backbone_lora=args.use_backbone_lora,
+        mlp_connector_layers=args.mlp_connector_layers,
+        block_size=args.block_size,
+        generation_mode=args.generation_mode,
     )
 
     train_cfg = TrainingConfig(
@@ -250,6 +269,7 @@ def parse_args():
         max_new_tokens=args.max_new_tokens,
         temperature=args.temperature,
         top_p=args.top_p,
+        keep_k_avg=args.keep_k_avg,
     )
 
     return model_cfg, train_cfg, data_cfg, infer_cfg, args.action, args.no_download, args.max_train, args.max_val, args

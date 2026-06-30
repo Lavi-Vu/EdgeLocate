@@ -18,16 +18,24 @@ SPECIAL_TOKENS = {
     "image": "<|image|>",
     "box_start": "<box>",
     "box_end": "</box>",
+    "ref_start": "<ref>",
+    "ref_end": "</ref>",
 }
 
 COORD_TOKENS = [f"<{i}>" for i in range(1001)]
 
-LOCANY_SPECIAL_TOKENS = list(SPECIAL_TOKENS.values()) + COORD_TOKENS
+LOCANY_SPECIAL_TOKENS = list(SPECIAL_TOKENS.values()) + COORD_TOKENS + ["<null>", "<text_mask>"]
 
-COORD_START_ID = 151668
 BOX_START_TOKEN_ID = 151666
 BOX_END_TOKEN_ID = 151667
+COORD_START_ID = 151670
+REF_START_TOKEN_ID = 151668
+REF_END_TOKEN_ID = 151669
+NULL_TOKEN_ID = 152671
+TEXT_MASK_TOKEN_ID = 152672
+
 IMAGE_TOKEN_ID = 151665
+IM_END_TOKEN_ID = 151645
 
 
 def coord_to_token(coord: int) -> str:
@@ -67,18 +75,14 @@ def parse_boxes_from_text(text: str) -> List[List[float]]:
             seen.add(t)
             boxes.append(b)
 
-    # Pattern 1: <ref>label</ref><box><d><d><d><d></box>
     for m in re.finditer(r"<ref>[^<]*</ref><box><(\d+)><(\d+)><(\d+)><(\d+)></box>", text):
         add([int(g) for g in m.groups()])
-    # Pattern 2: <box><d><d><d><d></box> (standalone boxes, no ref)
     for m in re.finditer(r"<box><(\d+)><(\d+)><(\d+)><(\d+)></box>", text):
         add([int(g) for g in m.groups()])
-    # Pattern 3: <ref>label<d+><d+><d+><d+>... (malformed, missing </ref><box>)
     for m in re.finditer(r"<ref>[^<]*((?:<\d+>)+)(?:</box>|$)", text):
         coords = [int(x.group(1)) for x in re.finditer(r"<(\d+)>", m.group(1))]
         for i in range(0, len(coords) - len(coords) % 4, 4):
             add(coords[i:i+4])
-    # Pattern 4: bare <d><d><d><d></box> (no ref at all)
     for m in re.finditer(r"<(\d+)><(\d+)><(\d+)><(\d+)></box>", text):
         add([int(g) for g in m.groups()])
 
@@ -86,30 +90,21 @@ def parse_boxes_from_text(text: str) -> List[List[float]]:
 
 
 def parse_labels_and_boxes(text: str) -> List[Tuple[str, List[float]]]:
-    """Extract (label, [x1,y1,x2,y2]) pairs from generated text.
-
-    Handles both correct (<ref>label</ref><box>...)
-    and malformed (<ref>label<box>... without </ref>) formats.
-    """
-    boxes_map = {}  # box_tuple -> label (prefers non-empty label)
+    boxes_map = {}
 
     def add(label, box):
         key = tuple(box)
         if key not in boxes_map or not boxes_map[key]:
             boxes_map[key] = label
 
-    # Pattern 1: <ref>label</ref><box><d><d><d><d></box>
     for m in re.finditer(r"<ref>([^<]*)</ref><box><(\d+)><(\d+)><(\d+)><(\d+)></box>", text):
         add(m.group(1), [int(g) for g in m.groups()[1:]])
-    # Pattern 2: <ref>label<box><d><d><d><d></box> (no </ref>, e.g. model generation)
     for m in re.finditer(r"<ref>([^<]*)<box><(\d+)><(\d+)><(\d+)><(\d+)></box>", text):
         add(m.group(1), [int(g) for g in m.groups()[1:]])
-    # Pattern 3: <ref>label<d+><d+><d+><d+>... (malformed, missing </ref><box> and <box>)
     for m in re.finditer(r"<ref>([^<]*)((?:<\d+>)+)(?:</box>|$)", text):
         coords = [int(x.group(1)) for x in re.finditer(r"<(\d+)>", m.group(2))]
         for i in range(0, len(coords) - len(coords) % 4, 4):
             add(m.group(1), coords[i:i+4])
-    # Pattern 4: standalone boxes without ref
     for m in re.finditer(r"<box><(\d+)><(\d+)><(\d+)><(\d+)></box>", text):
         add("", [int(g) for g in m.groups()])
 
@@ -167,13 +162,11 @@ DEFAULT_CHAT_TEMPLATE = (
     "{%- endif %}"
 )
 
+
 def setup_tokenizer(model_cfg) -> AutoTokenizer:
-    """Load tokenizer, add special tokens, and set default chat template."""
     tokenizer = AutoTokenizer.from_pretrained(
-        model_cfg.llm_model,
-        trust_remote_code=True,
-        padding_side="right",
-        use_fast=True,
+        model_cfg.llm_model, trust_remote_code=True,
+        padding_side="right", use_fast=True,
     )
     tokenizer.add_special_tokens({"additional_special_tokens": LOCANY_SPECIAL_TOKENS})
     if tokenizer.pad_token is None:
@@ -182,9 +175,7 @@ def setup_tokenizer(model_cfg) -> AutoTokenizer:
     return tokenizer
 
 
-def denormalize_boxes(
-    boxes: torch.Tensor, orig_sizes: torch.Tensor
-) -> torch.Tensor:
+def denormalize_boxes(boxes: torch.Tensor, orig_sizes: torch.Tensor) -> torch.Tensor:
     w = orig_sizes[:, 0:1]
     h = orig_sizes[:, 1:2]
     denorm = boxes.clone()

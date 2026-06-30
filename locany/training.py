@@ -11,9 +11,10 @@ from .model import LocateAnythingForDetection
 from .utils import logger, set_seed
 
 
-class _DetectionTrainer(Trainer):
-    """Custom Trainer that saves LoRA adapter and non-llm weights with every checkpoint."""
+IGNORE_INDEX = -100
 
+
+class _DetectionTrainer(Trainer):
     def _save(self, output_dir: Optional[str] = None, state_dict=None):
         super()._save(output_dir, state_dict)
         if output_dir is None:
@@ -22,7 +23,6 @@ class _DetectionTrainer(Trainer):
 
 
 def save_adapter_and_extra(model, output_dir: str, tokenizer=None):
-    """Save LoRA adapter (if present), non-LLM weights, tokenizer, and config."""
     if hasattr(model, "llm") and hasattr(model.llm, "peft_config"):
         model.llm.save_pretrained(output_dir)
         logger.info(f"LoRA adapter saved to {output_dir}")
@@ -42,22 +42,17 @@ def save_adapter_and_extra(model, output_dir: str, tokenizer=None):
         tokenizer.save_pretrained(output_dir)
 
 
-def setup_training(
-    model: LocateAnythingForDetection,
-    model_cfg: ModelConfig,
-    train_cfg: TrainingConfig,
-    train_dataset,
-    eval_dataset=None,
-    data_collator=None,
-    tokenizer=None,
-) -> Trainer:
-    """Set up the HF Trainer for detection training."""
+def setup_training(model, model_cfg: ModelConfig, train_cfg: TrainingConfig,
+                   train_dataset, eval_dataset=None, data_collator=None, tokenizer=None):
     set_seed(train_cfg.seed)
 
     if train_cfg.gradient_checkpointing:
         if hasattr(model.llm, "gradient_checkpointing_enable"):
             model.llm.gradient_checkpointing_enable()
             logger.info("Gradient checkpointing enabled on LLM")
+        if model.is_moonvit:
+            model.vision_encoder.encoder.gradient_checkpointing = True
+            logger.info("Gradient checkpointing enabled on MoonViT")
 
     deepspeed_config = train_cfg.deepspeed
     if deepspeed_config and not os.path.exists(deepspeed_config):
@@ -97,35 +92,40 @@ def setup_training(
         data_collator = DetectionDataCollator(tokenizer)
 
     trainer = _DetectionTrainer(
-        model=model,
-        args=training_args,
-        train_dataset=train_dataset,
-        eval_dataset=eval_dataset,
-        data_collator=data_collator,
-        processing_class=processing_class,
+        model=model, args=training_args,
+        train_dataset=train_dataset, eval_dataset=eval_dataset,
+        data_collator=data_collator, processing_class=processing_class,
     )
-
     return trainer
 
 
 class DetectionDataCollator:
-    """Data collator for detection training. Pads sequences, stacks images."""
-
     def __init__(self, tokenizer):
         self.tokenizer = tokenizer
 
     def __call__(self, features):
         batch = {}
         batch["pixel_values"] = torch.stack([f["pixel_values"] for f in features])
-
         input_ids = [f["input_ids"] if isinstance(f["input_ids"], torch.Tensor) else torch.tensor(f["input_ids"], dtype=torch.long) for f in features]
         attention_mask = [f["attention_mask"] if isinstance(f["attention_mask"], torch.Tensor) else torch.tensor(f["attention_mask"], dtype=torch.long) for f in features]
         labels = [f["labels"] if isinstance(f["labels"], torch.Tensor) else torch.tensor(f["labels"], dtype=torch.long) for f in features]
-
         batch["input_ids"] = pad_sequence(input_ids, batch_first=True, padding_value=self.tokenizer.pad_token_id)
         batch["attention_mask"] = pad_sequence(attention_mask, batch_first=True, padding_value=0)
-        batch["labels"] = pad_sequence(labels, batch_first=True, padding_value=-100)
+        batch["labels"] = pad_sequence(labels, batch_first=True, padding_value=IGNORE_INDEX)
+        return batch
 
+
+class PackedDataCollator:
+    """Collator for PackedDetectionDataset that stacks sub_sample_lengths and position_ids."""
+
+    def __call__(self, features):
+        batch = {}
+        batch["pixel_values"] = torch.stack([f["pixel_values"] for f in features])
+        batch["input_ids"] = torch.stack([f["input_ids"] for f in features])
+        batch["labels"] = torch.stack([f["labels"] for f in features])
+        batch["attention_mask"] = torch.stack([f["attention_mask"] for f in features])
+        batch["position_ids"] = torch.stack([f["position_ids"] for f in features])
+        batch["sub_sample_lengths"] = torch.stack([f["sub_sample_lengths"] for f in features])
         return batch
 
 

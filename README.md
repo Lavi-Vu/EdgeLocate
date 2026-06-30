@@ -2,33 +2,39 @@
 
 A <1B LocateAnything variant using **discrete coordinate tokens** (like EAGLE) instead of a regression head. Box coordinates are predicted as vocabulary tokens `<0>`–`<1000>` via standard cross-entropy loss through the LM head.
 
-Default base: **Qwen2.5-0.5B-Instruct** + **SigLIP-Base-Patch16-224** + 2-layer MLP projector + LoRA.
+Dual vision encoder support: **SigLIP** (fixed 224×224, legacy) or **MoonViT** (native-resolution, 1152-dim, 27-layer) with optional **Parallel Box Decoding (PBD/MTP)** generation.
 
 ## Architecture
 
 ```
-                                ┌──────────────────────────────────────┐
-  Image ──► Vision Encoder ──► MLP Projector ──┐                      │
-                                │              ▼                       │
+                                   ┌──────────────────────────────────────┐
+  Image ──► SigLIP/MoonViT VE ──► MLP Projector ──┐                      │
+                                   │              ▼                       │
   Text ──► Tokenizer ──► Embedding ──► Qwen2.5 LLM+LoRA ──► LM Head ──► Token IDs
-                                │              ▲                       │
-                                └── <|image|> anchor tokens ───────────┘
+                                   │              ▲                       │
+                                   └── <|image|> anchor tokens ───────────┘
+
+  Optional: PBD/MTP mode replaces single token sampling with parallel
+  block decoding (block_size=6) using non-causal multi-token prediction
+  masks for faster box generation.
 ```
 
-| Component | Model | Params | Default Freeze |
-|---|---|---|---|
-| Vision Encoder | `google/siglip-base-patch16-224` (or SigLIP2, MobileCLIP, ...) | 92.88M | ✅ Frozen |
-| MLP Projector | 2-layer Linear+GELU (VE hidden → LLM hidden) | ~1.5M | ❌ Trainable |
-| LLM | `Qwen/Qwen2.5-0.5B-Instruct` | 494.03M | ❌ LoRA (r=64–128) |
-| LM Head | Shared/untied output projection | 0.14M (untied) | ❌ Trainable |
-| **Total** | | **~589M** | **~37M trainable** |
+| Component | Model | Params (SigLIP) | Params (MoonViT) | Default Freeze |
+|---|---|---|---|---|
+| Vision Encoder | SigLIP-Base-P16-224 or MoonViT-SO-400M | 92.88M | 408.15M | ✅ Frozen |
+| VE LoRA | Optional backbone LoRA (r=8–16) | 0 | ~6M | Optional |
+| MLP Projector | 2–4 layer Linear+GELU (VE hidden → LLM hidden) | ~1.5M | ~1.8M | ❌ Trainable |
+| LLM | `Qwen/Qwen2.5-0.5B-Instruct` + LoRA (r=128) | 494.03M | 494.03M | ❌ LoRA |
+| LM Head | Untied output projection | 0.14M | 0.14M | ❌ Trainable |
+| **Total** | | **~589M** | **~904M** | **~37–44M trainable** |
 
 ## How It Works
 
-1. **Tokenization**: 1001 discrete coordinate tokens `<0>`–`<1000>` (IDs 151668–152668) plus `<box>` (151666), `</box>` (151667), `<ref>` (151669), and `</ref>` (151670) are added to the vocabulary
+1. **Tokenization**: 1001 discrete coordinate tokens `<0>`–`<1000>` (IDs 151670–152670) plus `<box>` (151666), `</box>` (151667), `<ref>` (151668), and `</ref>` (151669) are added to the vocabulary
 2. **Training**: Standard autoregressive next-token prediction. The GPT response contains `<ref>label</ref><box><d1><d2><d3><d4></box>` sequences where each `<d>` is a quantized coordinate in [0, 1000]
-3. **Generation**: Standard `llm.generate()` with `inputs_embeds` (visual features replace the `<|image|>` token position). The model auto-regressively produces coordinate tokens.
-4. **Box parsing**: Regex extracts `<ref>label</ref><box><(\d+)><(\d+)><(\d+)><(\d+)></box>` patterns from generated text, with fallbacks for malformed output.
+3. **Generation (AR)**: Standard `llm.generate()` with `inputs_embeds` (visual features replace the `<|image|>` token position). The model auto-regressively produces coordinate tokens.
+4. **Generation (PBD/MTP)**: Parallel Box Decoding predicts up to `block_size` tokens at once using multi-token prediction masks. Supports `fast` (pure MTP), `hybrid` (MTP with AR fallback), and `slow` (pure AR) modes.
+5. **Box parsing**: Regex extracts `<ref>label</ref><box><(\d+)><(\d+)><(\d+)><(\d+)></box>` patterns from generated text, with fallbacks for malformed output.
 
 ## Setup
 
@@ -68,12 +74,15 @@ python train.py --action train \
 ```
 
 Supported VEs:
-- `google/siglip-base-patch16-224` (default)
+- `google/siglip-base-patch16-224` (default, 224px, 768 dim, frozen)
 - `google/siglip2-base-patch16-224`
 - `google/siglip2-base-patch16-naflex`
 - `google/siglip-so400m-patch14-384`
 - `apple/MobileCLIP2-B`
-- `moonshotai/MoonViT-SO-400M` (native-resolution, 1152 dim, `trust_remote_code=True`)
+- `<path-to-moonvit-config>` (native-resolution, 1152 dim, 27-layer, patch merge)
+  - Activated by name containing "moonvit" or config with `merge_kernel_size`
+  - `--ve_hidden_size 1152` must be set
+  - See `locany/modeling_vit.py` for MoonViT architecture details
 
 ### Inference (via `infer.py`)
 ```bash
@@ -250,13 +259,46 @@ ShareGPT-style JSONL with `<ref>` and `<box>` tokens in the GPT response:
 - **Coordinates**: In [0, 1000] range, quantized to integer bins
 - **Image path**: Relative to `image_dir` or absolute
 
+## MoonViT Vision Encoder
+
+MoonViT (from NVIDIA's EagleVLM) is a 27-layer, 1152-dim ViT with native-resolution support:
+
+- **Native resolution**: Processes images at full input resolution (no fixed resize)
+- **2D RoPE**: Rotary position embeddings in 2D space for variable-resolution generalization
+- **Patch merging**: 2×2 kernel merges patches after encoding, producing (H/14/2)×(W/14/2) tokens with 4× channel width
+- **Automatic VE detection**: Set `--ve_model <path-to-moonvit-config>` or any name containing "moonvit"; configs with `merge_kernel_size` are auto-detected
+
+Activated by passing a MoonViT config path. The `MoonViTProjector` (LayerNorm + 4× channel → LLM hidden) handles the merged feature dimensions.
+
+## Parallel Box Decoding (PBD/MTP)
+
+PBD generates bounding boxes faster by predicting multiple tokens at once:
+
+- **MTP mode** (`--generation_mode fast`): Uses non-causal attention within a prediction block (size=`--block_size 6`). All `block_size` tokens are decoded in parallel via `sample_tokens()` / `decode_bbox_avg()`.
+- **Hybrid mode** (`--generation_mode hybrid`, default): Starts with MTP for box tokens, falls back to AR for text tokens. On malformed MTP output, resets to AR for that box.
+- **AR mode** (`--generation_mode slow`): Standard token-by-token generation (backward-compatible).
+
+PBD is only supported with batch_size=1 and is called via `model.generate_pbd()`.
+
+## Sequence Packing
+
+`PackedDetectionDataset` greedily concatenates multiple training samples into a single sequence up to `max_packed_tokens`, reducing padding waste:
+
+- Tracks `sub_sample_lengths` to create proper per-sample causal attention masks
+- Each sample gets its own `position_ids` (starting from 0), creating boundaries the mask logic detects
+- `PackedDataCollator` stacks packed batches with the required metadata
+
+Enable by wrapping your dataset: `PackedDetectionDataset(base_dataset, max_packed_tokens=2048)`.
+
 ## Key Design Decisions
 
 - **Discrete tokens over regression**: Cross-entropy loss provides strong per-class supervision through the full model (LM head → LLM → projector → VE). Unlike MSE regression, gradients flow to every component.
 - **LoRA on LLM** (r=64–128): The LLM must learn image-dependent hidden states at coordinate token positions. LoRA makes this feasible on a 4GB GPU.
+- **Optional VE LoRA** (`--use_backbone_lora N`): Applies LoRA to vision encoder attention/MLP layers (r=N) for fine-grained visual adaptation.
 - **Untied LM head**: `tie_word_embeddings=False` allows the LM head for new coordinate tokens to be trained independently from input embeddings.
-- **Frozen VE**: Vision encoder stays frozen to save memory; projector and LoRA adapt visual features.
-- **Standard autoregressive generation**: No PBD/MTP for now — simple `llm.generate()` with `inputs_embeds`.
+- **Frozen VE**: Vision encoder stays frozen by default to save memory; projector and LoRA adapt visual features.
+- **Dual generation modes**: PBD/MTP for faster inference on compatible models, AR fallback for backward compatibility.
+- **MLP connector depth** (`--mlp_connector_layers N`): Supports 2+ layer projectors with LayerNorm for deeper visual-language alignment.
 
 ## Programmatic API
 
@@ -291,16 +333,20 @@ Model:
   --freeze_vision_encoder         Freeze VE (default: True)
   --use_lora / --no-lora          Use LoRA on LLM (default: True)
   --lora_r, --lora_alpha          LoRA rank and alpha (default: 128, 256)
+  --use_backbone_lora N           Apply LoRA on VE (r=N, default: 0 = off)
+  --mlp_connector_layers N        MLP projector depth (default: 2)
+  --block_size N                  PBD block size (default: 6)
+  --generation_mode {hybrid,fast,slow}  PBD generation mode (default: hybrid)
   --attn_implementation           {sdpa,flash_attention_2,eager}
   --torch_dtype                   {float32,float16,bfloat16}
 
 Vision Encoders:
-  google/siglip-base-patch16-224        (default, 224px, 768 dim)
+  google/siglip-base-patch16-224        (SigLIP, 224px, 768 dim, default)
   google/siglip2-base-patch16-224        (SigLIP2, 224px)
   google/siglip2-base-patch16-naflex     (SigLIP2 + FlexiViT)
   google/siglip-so400m-patch14-384       (So400m, 384px, 1152 dim)
   apple/MobileCLIP2-B                    (MobileCLIP)
-  moonshotai/MoonViT-SO-400M             (native-resolution, 896px, 1152 dim)
+  <moonvit-config-path>                  (MoonViT, native-res, 1152 dim, 27-layer)
 
 Training:
   --output_dir, --num_epochs, --per_device_batch_size
@@ -313,9 +359,11 @@ Data:
   --train_data_path, --eval_data_path, --image_dir
   --data_recipe                  Path to multi-dataset recipe JSON
   --max_length
+  --use_online_packing           Enable sequence packing in dataset (default: False)
 
 Inference:
   --max_new_tokens, --temperature, --top_p
+  --generation_mode {hybrid,fast,slow}  PBD vs AR generation
 
 Prepare (RefCOCO):
   --coco_root, --ann_dir, --output_dir

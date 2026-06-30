@@ -296,3 +296,70 @@ class DetectionDataset(Dataset):
 
     def __getitem__(self, idx: int) -> Dict:
         return self.dataset[idx]
+
+
+class PackedDetectionDataset(Dataset):
+    """Sequence-packing variant: concatenates multiple samples into one sequence.
+
+    Packs samples greedily up to ``max_packed_tokens`` per item.
+    Returns ``sub_sample_lengths`` tensor for the model to create proper attention masks.
+    """
+
+    def __init__(
+        self,
+        base_dataset: Dataset,
+        max_packed_tokens: int = 2048,
+        buffer_size: int = 100,
+    ):
+        self.base = base_dataset
+        self.max_packed_tokens = max_packed_tokens
+        self.buffer_size = buffer_size
+        self._indices = list(range(len(base_dataset)))
+        random.shuffle(self._indices)
+        self._cursor = 0
+
+    def __len__(self) -> int:
+        return len(self._indices) // 2
+
+    def _get_next_sample(self):
+        if self._cursor >= len(self._indices):
+            random.shuffle(self._indices)
+            self._cursor = 0
+        idx = self._indices[self._cursor]
+        self._cursor += 1
+        return self.base[idx]
+
+    def __getitem__(self, _: int) -> Dict:
+        packed = []
+        total_tokens = 0
+
+        for _ in range(16):
+            sample = self._get_next_sample()
+            slen = sample['input_ids'].shape[0]
+            if total_tokens + slen > self.max_packed_tokens:
+                if not packed:
+                    packed.append(sample)
+                break
+            packed.append(sample)
+            total_tokens += slen
+
+        input_ids = torch.cat([s['input_ids'] for s in packed], dim=0)
+        labels = torch.cat([s['labels'] for s in packed], dim=0)
+        pixel_values = packed[0]['pixel_values']
+        attention_mask = torch.ones_like(input_ids)
+        sub_sample_lengths = torch.tensor([s['input_ids'].shape[0] for s in packed], dtype=torch.long)
+
+        cumsum = sub_sample_lengths.cumsum(0)
+        position_ids = torch.cat([
+            torch.arange(slen, dtype=torch.long)
+            for slen in sub_sample_lengths.tolist()
+        ], dim=0)
+
+        return {
+            "input_ids": input_ids,
+            "labels": labels,
+            "attention_mask": attention_mask,
+            "pixel_values": pixel_values,
+            "position_ids": position_ids,
+            "sub_sample_lengths": sub_sample_lengths,
+        }
