@@ -90,7 +90,10 @@ class VisionEncoderWrapper(nn.Module):
             self._load_moonvit()
         else:
             self._load_standard_encoder()
-        self._patch_size = getattr(self.encoder.config, "patch_size", 14)
+        cfg = self.encoder.config
+        if hasattr(cfg, 'vision_config'):
+            cfg = cfg.vision_config
+        self._patch_size = getattr(cfg, "patch_size", 14)
 
     def _load_moonvit(self):
         from .modeling_vit import MoonVitPretrainedModel, MoonViTConfig
@@ -113,6 +116,7 @@ class VisionEncoderWrapper(nn.Module):
                 self.encoder = Siglip2VisionModel.from_pretrained(self.model_name, **encoder_kwargs)
             except Exception:
                 self.encoder = AutoModel.from_pretrained(self.model_name, **encoder_kwargs)
+            self._fix_siglip2_patch_embedding()
         elif "siglip" in name:
             try:
                 from transformers import SiglipVisionModel
@@ -123,8 +127,69 @@ class VisionEncoderWrapper(nn.Module):
             self.encoder = AutoModel.from_pretrained(self.model_name, **encoder_kwargs)
         else:
             self.encoder = AutoModel.from_pretrained(self.model_name, **encoder_kwargs)
-        self.hidden_size = self.encoder.config.hidden_size
-        self.image_size = getattr(self.encoder.config, "image_size", 224)
+        cfg = self.encoder.config
+        if hasattr(cfg, 'vision_config'):
+            cfg = cfg.vision_config
+        self.hidden_size = cfg.hidden_size
+        self.image_size = getattr(cfg, "image_size", 224)
+
+    def _fix_siglip2_patch_embedding(self):
+        """Convert Conv2d checkpoint weights to Linear for SigLIP2 patch embedding."""
+        try:
+            import safetensors.torch
+            from huggingface_hub import hf_hub_download
+
+            model_id = self.model_name
+
+            # Single safetensors file (non-sharded)
+            weight_file = hf_hub_download(model_id, "model.safetensors")
+            ckpt = safetensors.torch.load_file(weight_file)
+
+            pe = self.encoder.embeddings.patch_embedding
+
+            # Try key variants (with/without vision_model. prefix)
+            ckpt_key_candidates = [
+                "embeddings.patch_embedding.weight",
+                "vision_model.embeddings.patch_embedding.weight",
+            ]
+            ckpt_key = next((k for k in ckpt_key_candidates if k in ckpt), None)
+
+            if ckpt_key is not None and isinstance(pe, nn.Linear):
+                conv_w = ckpt[ckpt_key]  # (out_ch, in_ch, kh, kw)
+                if conv_w.dim() == 4:
+                    linear_w = conv_w.view(conv_w.shape[0], -1)
+                    if linear_w.shape == pe.weight.shape:
+                        pe.weight.data.copy_(linear_w.to(pe.weight.dtype))
+                        logger.info(f"Converted Conv2D → Linear patch_embedding: {conv_w.shape} → {linear_w.shape}")
+
+            pos_key_candidates = [
+                "embeddings.position_embedding.weight",
+                "vision_model.embeddings.position_embedding.weight",
+            ]
+            pos_key = next((k for k in pos_key_candidates if k in ckpt), None)
+
+            if pos_key is not None:
+                ckpt_pos = ckpt[pos_key]
+                model_pos = self.encoder.embeddings.position_embedding.weight
+                if ckpt_pos.shape[0] < model_pos.shape[0]:
+                    dim = ckpt_pos.shape[-1]
+                    ckpt_h = ckpt_w = int(ckpt_pos.shape[0] ** 0.5)
+                    model_h = model_w = int(model_pos.shape[0] ** 0.5)
+                    ckpt_pos_2d = ckpt_pos.view(ckpt_h, ckpt_w, dim).permute(2, 0, 1).unsqueeze(0)
+                    model_pos_2d = (
+                        torch.nn.functional.interpolate(
+                            ckpt_pos_2d, size=(model_h, model_w), mode="bicubic", align_corners=False
+                        )
+                        .squeeze(0)
+                        .permute(1, 2, 0)
+                        .view(-1, dim)
+                    )
+                    model_pos.data.copy_(model_pos_2d.to(model_pos.dtype))
+                    logger.info(f"Interpolated position_embedding: {ckpt_pos.shape} → {model_pos.shape}")
+                elif ckpt_pos.shape[0] > model_pos.shape[0]:
+                    model_pos.data.copy_(ckpt_pos[:model_pos.shape[0]].to(model_pos.dtype))
+        except Exception as e:
+            logger.warning(f"Could not fix SigLIP2 patch embedding: {e}")
 
     def forward(self, pixel_values: torch.Tensor, **kwargs) -> torch.Tensor:
         if self.is_moonvit:
@@ -167,7 +232,10 @@ class VisionEncoderWrapper(nn.Module):
             ps = self._patch_size
             kh, kw = self.merge_kernel_size
             return (img_h // ps // kh) * (img_w // ps // kw)
-        ps = getattr(self.encoder.config, "patch_size", 16)
+        cfg = self.encoder.config
+        if hasattr(cfg, 'vision_config'):
+            cfg = cfg.vision_config
+        ps = getattr(cfg, "patch_size", 16)
         return (img_h // ps) * (img_w // ps)
 
 
