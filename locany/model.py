@@ -129,8 +129,8 @@ class VisionEncoderWrapper(nn.Module):
             self.encoder = AutoModel.from_pretrained(self.model_name, **encoder_kwargs)
         else:
             self.encoder = AutoModel.from_pretrained(self.model_name, **encoder_kwargs)
-        # Unwrap dual models (Siglip2Model/SiglipModel have .vision_model submodule)
-        if hasattr(self.encoder, 'vision_model') and hasattr(self.encoder.vision_model, 'embeddings'):
+        # Unwrap dual models — only if encoder has both vision_model AND text_model (Siglip2Model)
+        if hasattr(self.encoder, 'vision_model') and hasattr(self.encoder, 'text_model'):
             self.encoder = self.encoder.vision_model
         cfg = self.encoder.config
         if hasattr(cfg, 'vision_config'):
