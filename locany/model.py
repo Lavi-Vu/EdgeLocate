@@ -108,14 +108,14 @@ class VisionEncoderWrapper(nn.Module):
 
     def _load_standard_encoder(self):
         name = self.model_name.lower()
-        self._is_siglip2 = "siglip2" in name
+        self._is_siglip2 = False
         encoder_kwargs = dict(dtype=self.dtype, trust_remote_code=True)
         if "siglip2" in name:
-            try:
-                from transformers import Siglip2VisionModel
-                self.encoder = Siglip2VisionModel.from_pretrained(self.model_name, **encoder_kwargs)
-            except Exception:
-                self.encoder = AutoModel.from_pretrained(self.model_name, **encoder_kwargs)
+            from transformers import Siglip2VisionModel
+            self.encoder = Siglip2VisionModel.from_pretrained(
+                self.model_name, ignore_mismatched_sizes=True, **encoder_kwargs
+            )
+            self._is_siglip2 = True
             self._fix_siglip2_patch_embedding()
         elif "siglip" in name:
             try:
