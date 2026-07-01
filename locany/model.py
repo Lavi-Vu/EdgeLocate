@@ -50,13 +50,13 @@ class MLPProjector(nn.Module):
 class MoonViTProjector(nn.Module):
     """MLP projector for MoonViT with LayerNorm + 4x channel handling (patch merge)."""
 
-    def __init__(self, vit_hidden_size: int, llm_hidden_size: int):
+    def __init__(self, vit_hidden_size: int, llm_hidden_size: int, dtype: torch.dtype = torch.float32):
         super().__init__()
         self.model = nn.Sequential(
-            nn.LayerNorm(vit_hidden_size * 4),
-            nn.Linear(vit_hidden_size * 4, llm_hidden_size),
+            nn.LayerNorm(vit_hidden_size * 4, dtype=dtype),
+            nn.Linear(vit_hidden_size * 4, llm_hidden_size, dtype=dtype),
             nn.GELU(),
-            nn.Linear(llm_hidden_size, llm_hidden_size),
+            nn.Linear(llm_hidden_size, llm_hidden_size, dtype=dtype),
         )
         self._init_weights()
 
@@ -188,7 +188,7 @@ class LocateAnythingForDetection(PreTrainedModel):
         self.is_moonvit = self.vision_encoder.is_moonvit
 
         if self.is_moonvit:
-            self.projector = MoonViTProjector(ve_hidden, config.llm_hidden_size).to(dtype=dtype)
+            self.projector = MoonViTProjector(ve_hidden, config.llm_hidden_size, dtype=dtype)
         else:
             self.projector = MLPProjector(ve_hidden, config.llm_hidden_size,
                                           num_layers=config.mlp_connector_layers).to(dtype=dtype)
