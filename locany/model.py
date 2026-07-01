@@ -106,22 +106,23 @@ class VisionEncoderWrapper(nn.Module):
     def _load_standard_encoder(self):
         name = self.model_name.lower()
         self._is_siglip2 = "siglip2" in name
+        encoder_kwargs = dict(dtype=self.dtype, trust_remote_code=True)
         if "siglip2" in name:
             try:
                 from transformers import Siglip2VisionModel
-                self.encoder = Siglip2VisionModel.from_pretrained(self.model_name, dtype=self.dtype, ignore_mismatched_sizes=True)
-            except (ImportError, OSError, ValueError):
-                self.encoder = AutoModel.from_pretrained(self.model_name, dtype=self.dtype, trust_remote_code=True)
+                self.encoder = Siglip2VisionModel.from_pretrained(self.model_name, **encoder_kwargs)
+            except Exception:
+                self.encoder = AutoModel.from_pretrained(self.model_name, **encoder_kwargs)
         elif "siglip" in name:
             try:
                 from transformers import SiglipVisionModel
-                self.encoder = SiglipVisionModel.from_pretrained(self.model_name, dtype=self.dtype, ignore_mismatched_sizes=True)
-            except (OSError, ValueError):
-                self.encoder = AutoModel.from_pretrained(self.model_name, dtype=self.dtype, trust_remote_code=True)
+                self.encoder = SiglipVisionModel.from_pretrained(self.model_name, **encoder_kwargs)
+            except Exception:
+                self.encoder = AutoModel.from_pretrained(self.model_name, **encoder_kwargs)
         elif "mobileclip" in name:
-            self.encoder = AutoModel.from_pretrained(self.model_name, dtype=self.dtype, trust_remote_code=True)
+            self.encoder = AutoModel.from_pretrained(self.model_name, **encoder_kwargs)
         else:
-            self.encoder = AutoModel.from_pretrained(self.model_name, dtype=self.dtype, trust_remote_code=True)
+            self.encoder = AutoModel.from_pretrained(self.model_name, **encoder_kwargs)
         self.hidden_size = self.encoder.config.hidden_size
         self.image_size = getattr(self.encoder.config, "image_size", 224)
 
