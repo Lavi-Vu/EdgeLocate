@@ -77,6 +77,7 @@ class VisionEncoderWrapper(nn.Module):
         self.select_layer = select_layer
         self.dtype = dtype
         self.model_name = model_name
+        self._is_siglip2 = False
         self.is_moonvit = "moonvit" in model_name.lower()
         if not self.is_moonvit:
             try:
@@ -104,6 +105,7 @@ class VisionEncoderWrapper(nn.Module):
 
     def _load_standard_encoder(self):
         name = self.model_name.lower()
+        self._is_siglip2 = "siglip2" in name
         if "siglip2" in name:
             try:
                 from transformers import Siglip2VisionModel
@@ -139,6 +141,17 @@ class VisionEncoderWrapper(nn.Module):
                 else:
                     outputs = torch.stack(outputs, dim=0)
             return outputs
+        elif self._is_siglip2:
+            B, _, H, W = pixel_values.shape
+            ps = self._patch_size
+            ph, pw = H // ps, W // ps
+            pixel_attention_mask = torch.ones(B, ph, pw, device=pixel_values.device, dtype=pixel_values.dtype)
+            spatial_shapes = torch.tensor([[ph, pw]], device=pixel_values.device, dtype=torch.long)
+            outputs = self.encoder(pixel_values, pixel_attention_mask=pixel_attention_mask,
+                                   spatial_shapes=spatial_shapes, output_hidden_states=True)
+            if self.select_layer == -1:
+                return outputs.last_hidden_state
+            return outputs.hidden_states[self.select_layer]
         else:
             outputs = self.encoder(pixel_values, output_hidden_states=True)
             if self.select_layer == -1:
