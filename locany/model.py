@@ -3,6 +3,8 @@ from typing import Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+from huggingface_hub import try_to_load_from_cache
 from transformers import (
     AutoConfig, AutoModel, AutoModelForCausalLM,
     PreTrainedModel, GenerationConfig,
@@ -137,57 +139,50 @@ class VisionEncoderWrapper(nn.Module):
         """Convert Conv2d checkpoint weights to Linear for SigLIP2 patch embedding."""
         try:
             import safetensors.torch
-            from huggingface_hub import hf_hub_download
+            from huggingface_hub import try_to_load_from_cache
 
-            model_id = self.model_name
+            # Find cached checkpoint without re-downloading
+            cached = try_to_load_from_cache(self.model_name, "model.safetensors")
+            if cached is None or cached == "_CACHED_NO_EXIST":
+                logger.warning("SigLIP2 model.safetensors not cached, skipping weight fix")
+                return
 
-            # Single safetensors file (non-sharded)
-            weight_file = hf_hub_download(model_id, "model.safetensors")
-            ckpt = safetensors.torch.load_file(weight_file)
-
+            ckpt = safetensors.torch.load_file(cached)
             pe = self.encoder.embeddings.patch_embedding
 
-            # Try key variants (with/without vision_model. prefix)
-            ckpt_key_candidates = [
-                "embeddings.patch_embedding.weight",
-                "vision_model.embeddings.patch_embedding.weight",
-            ]
-            ckpt_key = next((k for k in ckpt_key_candidates if k in ckpt), None)
+            for prefix in ("embeddings", "vision_model.embeddings"):
+                patch_key = f"{prefix}.patch_embedding.weight"
+                pos_key = f"{prefix}.position_embedding.weight"
 
-            if ckpt_key is not None and isinstance(pe, nn.Linear):
-                conv_w = ckpt[ckpt_key]  # (out_ch, in_ch, kh, kw)
-                if conv_w.dim() == 4:
-                    linear_w = conv_w.view(conv_w.shape[0], -1)
-                    if linear_w.shape == pe.weight.shape:
-                        pe.weight.data.copy_(linear_w.to(pe.weight.dtype))
-                        logger.info(f"Converted Conv2D → Linear patch_embedding: {conv_w.shape} → {linear_w.shape}")
+                if patch_key in ckpt and isinstance(pe, nn.Linear):
+                    conv_w = ckpt[patch_key]
+                    if conv_w.dim() == 4:
+                        linear_w = conv_w.view(conv_w.shape[0], -1)
+                        if linear_w.shape == pe.weight.shape:
+                            pe.weight.data.copy_(linear_w.to(pe.weight.dtype))
+                            logger.info(f"Converted Conv2D → Linear: {conv_w.shape} → {linear_w.shape}")
+                            break
 
-            pos_key_candidates = [
-                "embeddings.position_embedding.weight",
-                "vision_model.embeddings.position_embedding.weight",
-            ]
-            pos_key = next((k for k in pos_key_candidates if k in ckpt), None)
-
-            if pos_key is not None:
+            for prefix in ("embeddings", "vision_model.embeddings"):
+                pos_key = f"{prefix}.position_embedding.weight"
+                if pos_key not in ckpt:
+                    continue
                 ckpt_pos = ckpt[pos_key]
                 model_pos = self.encoder.embeddings.position_embedding.weight
-                if ckpt_pos.shape[0] < model_pos.shape[0]:
+                if ckpt_pos.shape[0] == model_pos.shape[0]:
+                    model_pos.data.copy_(ckpt_pos.to(model_pos.dtype))
+                elif ckpt_pos.shape[0] < model_pos.shape[0]:
                     dim = ckpt_pos.shape[-1]
                     ckpt_h = ckpt_w = int(ckpt_pos.shape[0] ** 0.5)
                     model_h = model_w = int(model_pos.shape[0] ** 0.5)
                     ckpt_pos_2d = ckpt_pos.view(ckpt_h, ckpt_w, dim).permute(2, 0, 1).unsqueeze(0)
-                    model_pos_2d = (
-                        torch.nn.functional.interpolate(
-                            ckpt_pos_2d, size=(model_h, model_w), mode="bicubic", align_corners=False
-                        )
-                        .squeeze(0)
-                        .permute(1, 2, 0)
-                        .view(-1, dim)
-                    )
+                    interp = F.interpolate(ckpt_pos_2d, size=(model_h, model_w), mode="bicubic")
+                    model_pos_2d = interp.squeeze(0).permute(1, 2, 0).view(-1, dim)
                     model_pos.data.copy_(model_pos_2d.to(model_pos.dtype))
                     logger.info(f"Interpolated position_embedding: {ckpt_pos.shape} → {model_pos.shape}")
-                elif ckpt_pos.shape[0] > model_pos.shape[0]:
+                else:
                     model_pos.data.copy_(ckpt_pos[:model_pos.shape[0]].to(model_pos.dtype))
+                break
         except Exception as e:
             logger.warning(f"Could not fix SigLIP2 patch embedding: {e}")
 
@@ -208,12 +203,17 @@ class VisionEncoderWrapper(nn.Module):
                     outputs = torch.stack(outputs, dim=0)
             return outputs
         elif self._is_siglip2:
-            B, _, H, W = pixel_values.shape
+            B, C, H, W = pixel_values.shape
             ps = self._patch_size
             ph, pw = H // ps, W // ps
+            # SigLIP2's patch_embedding is nn.Linear expecting (..., C*ps*ps) not raw (B, C, H, W)
+            # Patch the image manually: (B, C, H, W) -> (B, ph*pw, C*ps*ps)
+            patches = pixel_values.unfold(2, ps, ps).unfold(3, ps, ps)
+            patches = patches.permute(0, 2, 3, 1, 4, 5).contiguous()
+            pixel_patches = patches.view(B, ph * pw, C * ps * ps)
             pixel_attention_mask = torch.ones(B, ph, pw, device=pixel_values.device, dtype=pixel_values.dtype)
             spatial_shapes = torch.tensor([[ph, pw]], device=pixel_values.device, dtype=torch.long)
-            outputs = self.encoder(pixel_values, pixel_attention_mask=pixel_attention_mask,
+            outputs = self.encoder(pixel_patches, pixel_attention_mask=pixel_attention_mask,
                                    spatial_shapes=spatial_shapes, output_hidden_states=True)
             if self.select_layer == -1:
                 return outputs.last_hidden_state
