@@ -171,7 +171,6 @@ def parse_args():
     train_group.add_argument("--save_total_limit", type=int, default=3)
     train_group.add_argument("--lr_scheduler_type", default="cosine")
     train_group.add_argument("--max_grad_norm", type=float, default=1.0)
-    train_group.add_argument("--block_size", type=int, default=2048)
     train_group.add_argument("--packing", action="store_true", default=False)
     train_group.add_argument("--seed", type=int, default=42)
 
