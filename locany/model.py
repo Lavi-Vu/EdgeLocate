@@ -80,9 +80,9 @@ class VisionEncoderWrapper(nn.Module):
         self.is_moonvit = "moonvit" in model_name.lower()
         if not self.is_moonvit:
             try:
-                from .modeling_vit import MoonViTConfig
-                cfg_check = MoonViTConfig.from_pretrained(model_name)
-                self.is_moonvit = hasattr(cfg_check, 'merge_kernel_size')
+                from transformers import PretrainedConfig
+                raw = PretrainedConfig.from_pretrained(model_name)
+                self.is_moonvit = raw.model_type == "moonvit"
             except Exception:
                 pass
         if self.is_moonvit:
@@ -94,11 +94,8 @@ class VisionEncoderWrapper(nn.Module):
     def _load_moonvit(self):
         from .modeling_vit import MoonVitPretrainedModel, MoonViTConfig
         from transformers import PretrainedConfig
-        try:
-            raw = PretrainedConfig.from_pretrained(self.model_name, trust_remote_code=True)
-            config = MoonViTConfig(**raw.to_dict())
-        except Exception:
-            config = MoonViTConfig.from_pretrained(self.model_name)
+        raw = PretrainedConfig.from_pretrained(self.model_name)
+        config = MoonViTConfig(**raw.to_dict())
         config._attn_implementation = 'sdpa'
         self.encoder = MoonVitPretrainedModel(config)
         self.hidden_size = config.hidden_size
