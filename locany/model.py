@@ -129,6 +129,9 @@ class VisionEncoderWrapper(nn.Module):
             self.encoder = AutoModel.from_pretrained(self.model_name, **encoder_kwargs)
         else:
             self.encoder = AutoModel.from_pretrained(self.model_name, **encoder_kwargs)
+        # Unwrap dual models (Siglip2Model/SiglipModel have .vision_model submodule)
+        if hasattr(self.encoder, 'vision_model') and hasattr(self.encoder.vision_model, 'embeddings'):
+            self.encoder = self.encoder.vision_model
         cfg = self.encoder.config
         if hasattr(cfg, 'vision_config'):
             cfg = cfg.vision_config
@@ -211,7 +214,7 @@ class VisionEncoderWrapper(nn.Module):
             patches = pixel_values.unfold(2, ps, ps).unfold(3, ps, ps)
             patches = patches.permute(0, 2, 3, 1, 4, 5).contiguous()
             pixel_patches = patches.view(B, ph * pw, C * ps * ps)
-            pixel_attention_mask = torch.ones(B, ph, pw, device=pixel_values.device, dtype=pixel_values.dtype)
+            pixel_attention_mask = torch.ones(B, ph * pw, device=pixel_values.device, dtype=pixel_values.dtype)
             spatial_shapes = torch.tensor([[ph, pw]], device=pixel_values.device, dtype=torch.long)
             outputs = self.encoder(pixel_patches, pixel_attention_mask=pixel_attention_mask,
                                    spatial_shapes=spatial_shapes, output_hidden_states=True)
