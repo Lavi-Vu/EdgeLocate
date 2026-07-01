@@ -44,7 +44,7 @@ class MLPProjector(nn.Module):
                     nn.init.constant_(m.bias, 0.0)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.model(x)
+        return self.model(x.to(self.model[0].weight.dtype))
 
 
 class MoonViTProjector(nn.Module):
@@ -68,7 +68,7 @@ class MoonViTProjector(nn.Module):
                     nn.init.constant_(m.bias, 0.0)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.model(x)
+        return self.model(x.to(self.model[0].weight.dtype))
 
 
 class VisionEncoderWrapper(nn.Module):
