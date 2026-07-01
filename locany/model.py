@@ -93,7 +93,12 @@ class VisionEncoderWrapper(nn.Module):
 
     def _load_moonvit(self):
         from .modeling_vit import MoonVitPretrainedModel, MoonViTConfig
-        config = MoonViTConfig.from_pretrained(self.model_name)
+        from transformers import PretrainedConfig
+        try:
+            raw = PretrainedConfig.from_pretrained(self.model_name, trust_remote_code=True)
+            config = MoonViTConfig(**raw.to_dict())
+        except Exception:
+            config = MoonViTConfig.from_pretrained(self.model_name)
         config._attn_implementation = 'sdpa'
         self.encoder = MoonVitPretrainedModel(config)
         self.hidden_size = config.hidden_size

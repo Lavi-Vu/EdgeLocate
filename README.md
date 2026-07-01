@@ -79,10 +79,10 @@ Supported VEs:
 - `google/siglip2-base-patch16-naflex`
 - `google/siglip-so400m-patch14-384`
 - `apple/MobileCLIP2-B`
-- `<path-to-moonvit-config>` (native-resolution, 1152 dim, 27-layer, patch merge)
-  - Activated by name containing "moonvit" or config with `merge_kernel_size`
-  - `--ve_hidden_size 1152` must be set
-  - See `locany/modeling_vit.py` for MoonViT architecture details
+- `moonshotai/MoonViT-SO-400M` (native-resolution, 1152 dim, 27-layer, patch merge)
+  - Set `--ve_hidden_size 1152` when using MoonViT
+  - Auto-detected by model name containing "moonvit" or config with `merge_kernel_size`
+  - See `locany/modeling_vit.py` for architecture details
 
 ### Inference (via `infer.py`)
 ```bash
