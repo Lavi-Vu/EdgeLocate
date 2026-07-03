@@ -291,6 +291,18 @@ class DetectionDataset(Dataset):
         else:
             self.dataset = ConcatDataset(datasets)
 
+    @property
+    def data(self) -> List[Dict]:
+        """Expose raw JSON lines for evaluation access."""
+        if hasattr(self.dataset, 'datasets'):
+            for ds in self.dataset.datasets:
+                if hasattr(ds, 'data'):
+                    return ds.data
+            return []
+        if hasattr(self.dataset, 'data'):
+            return self.dataset.data
+        return []
+
     def __len__(self) -> int:
         return len(self.dataset) if self.dataset is not None else 0
 

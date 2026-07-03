@@ -19,3 +19,4 @@ data/*
 results.json
 .vscode
 .vscode/*
+checkpoint-*/*
