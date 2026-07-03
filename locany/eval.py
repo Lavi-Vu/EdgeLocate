@@ -144,6 +144,13 @@ def _resolve_image_path(image_path: str, image_dir: str) -> Optional[str]:
     return resolved if os.path.exists(resolved) else None
 
 
+def _denorm_boxes(boxes, img_w, img_h):
+    return [[
+        x1 * img_w / 1000.0, y1 * img_h / 1000.0,
+        x2 * img_w / 1000.0, y2 * img_h / 1000.0,
+    ] for x1, y1, x2, y2 in boxes]
+
+
 def run_benchmark(
     model,
     tokenizer,
@@ -167,8 +174,6 @@ def run_benchmark(
     all_ious = []
     all_precisions = []
     all_recalls = []
-
-    from PIL import Image
 
     valid_indices = []
     for i in range(len(dataset)):
@@ -198,40 +203,45 @@ def run_benchmark(
         batch_indices = valid_indices[start_idx:end_idx]
 
         batch_images = []
-        batch_gt_boxes = []
+        batch_gt_boxes_pixel = []
+        batch_prompts = []
         batch_ids = []
+        batch_sizes = []
 
         for idx in batch_indices:
             raw = dataset.data[idx]
             resolved = _resolve_image_path(raw["image"], image_dir)
             image = Image.open(resolved).convert("RGB")
+            w, h = image.size
             batch_images.append(image)
             batch_ids.append(idx)
+            batch_sizes.append((w, h))
 
             gt_text = None
             for conv in raw.get("conversations", []):
                 if conv.get("from") in ("gpt", "assistant"):
                     gt_text = conv["value"]
                     break
-            gt_boxes = parse_boxes_from_text(gt_text or "")
-            batch_gt_boxes.append(gt_boxes)
+            gt_tokens_boxes = parse_boxes_from_text(gt_text or "")
+            batch_gt_boxes_pixel.append(_denorm_boxes(gt_tokens_boxes, w, h))
 
-        human_text = ""
-        raw0 = dataset.data[valid_indices[0]]
-        for conv in raw0.get("conversations", []):
-            if conv.get("from") in ("human", "user"):
-                human_text = conv["value"]
-                break
-        prompt = _make_prompt(human_text)
+            human_text = ""
+            for conv in raw.get("conversations", []):
+                if conv.get("from") in ("human", "user"):
+                    human_text = conv["value"]
+                    break
+            batch_prompts.append(_make_prompt(human_text))
 
         batch_results = engine.predict_batch(
-            batch_images, [prompt] * len(batch_images), batch_size=len(batch_images)
+            batch_images, batch_prompts, batch_size=len(batch_images)
         )
 
         for j, result in enumerate(batch_results):
-            pred_boxes = result["boxes"]
-            gt_boxes = batch_gt_boxes[j]
+            pred_tokens_boxes = result["boxes"]
             img_id = batch_ids[j]
+            w, h = batch_sizes[j]
+            gt_boxes = batch_gt_boxes_pixel[j]
+            pred_boxes = _denorm_boxes(pred_tokens_boxes, w, h) if pred_tokens_boxes else []
 
             pred_boxes_by_image[img_id] = pred_boxes
             gt_boxes_by_image[img_id] = gt_boxes
