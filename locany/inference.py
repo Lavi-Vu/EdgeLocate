@@ -200,6 +200,8 @@ def visualize_boxes(image: Image.Image, boxes: List[List[float]],
         font = ImageFont.load_default()
     for i, box in enumerate(boxes):
         x1, y1, x2, y2 = map(int, box)
+        x1, x2 = min(x1, x2), max(x1, x2)
+        y1, y2 = min(y1, y2), max(y1, y2)
         draw.rectangle([x1, y1, x2, y2], outline="red", width=3)
         if labels and i < len(labels) and labels[i]:
             label = labels[i]
@@ -226,6 +228,8 @@ def visualize_prediction(image: Image.Image, pred_boxes: List[List[float]],
 
     for i, box in enumerate(gt_boxes):
         x1, y1, x2, y2 = map(int, box)
+        x1, x2 = min(x1, x2), max(x1, x2)
+        y1, y2 = min(y1, y2), max(y1, y2)
         draw.rectangle([x1, y1, x2, y2], outline="lime", width=2)
         if gt_labels and i < len(gt_labels) and gt_labels[i]:
             label = f"GT: {gt_labels[i]}"
@@ -236,6 +240,8 @@ def visualize_prediction(image: Image.Image, pred_boxes: List[List[float]],
 
     for i, box in enumerate(pred_boxes):
         x1, y1, x2, y2 = map(int, box)
+        x1, x2 = min(x1, x2), max(x1, x2)
+        y1, y2 = min(y1, y2), max(y1, y2)
         draw.rectangle([x1, y1, x2, y2], outline="red", width=3)
         if pred_labels and i < len(pred_labels) and pred_labels[i]:
             label = f"PRED: {pred_labels[i]}"
