@@ -54,6 +54,8 @@ def main():
     parser.add_argument("--output", default=None, help="Save results JSON")
     parser.add_argument("--visualize", type=int, default=0,
                         help="Number of images to save with predictions vs ground truth")
+    parser.add_argument("--mode", default="hybrid", choices=["fast", "hybrid", "slow"],
+                        help="Generation mode: fast (PBD only), hybrid (PBD+AR fallback), slow (AR only)")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -81,6 +83,7 @@ def main():
         batch_size=args.batch_size,
         visualize=args.visualize,
         visualize_dir=vis_dir,
+        mode=args.mode,
     )
 
     print("\n=== Results ===")

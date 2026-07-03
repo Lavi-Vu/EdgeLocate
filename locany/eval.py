@@ -161,13 +161,15 @@ def run_benchmark(
     batch_size: int = 8,
     visualize: int = 0,
     visualize_dir: Optional[str] = None,
+    mode: str = "hybrid",
 ) -> Dict[str, float]:
     from .config import InferenceConfig
     from .inference import DetectionInferenceEngine, visualize_prediction
     from .utils import parse_boxes_from_text, parse_labels_and_boxes
 
-    inf_cfg = InferenceConfig(max_new_tokens=512)
+    inf_cfg = InferenceConfig(max_new_tokens=512, mode=mode)
     engine = DetectionInferenceEngine(model, tokenizer, inf_cfg)
+    use_pbd = mode != "slow" and getattr(model, "is_moonvit", False)
 
     pred_boxes_by_image = {}
     gt_boxes_by_image = {}
@@ -232,9 +234,14 @@ def run_benchmark(
                     break
             batch_prompts.append(_make_prompt(human_text))
 
-        batch_results = engine.predict_batch(
-            batch_images, batch_prompts, batch_size=len(batch_images)
-        )
+        if use_pbd:
+            batch_results = []
+            for img, prompt in zip(batch_images, batch_prompts):
+                batch_results.append(engine.predict(img, prompt))
+        else:
+            batch_results = engine.predict_batch(
+                batch_images, batch_prompts, batch_size=len(batch_images)
+            )
 
         for j, result in enumerate(batch_results):
             pred_boxes = result["boxes"]
@@ -384,6 +391,7 @@ def benchmark_on_jsonl(
     batch_size: int = 8,
     visualize: int = 0,
     visualize_dir: Optional[str] = None,
+    mode: str = "hybrid",
 ) -> Dict[str, float]:
     from .dataset import DetectionDataset
     ds = DetectionDataset(
@@ -393,4 +401,4 @@ def benchmark_on_jsonl(
     )
     return run_benchmark(model, tokenizer, ds, image_dir, max_samples=max_samples,
                          batch_size=batch_size, visualize=visualize,
-                         visualize_dir=visualize_dir)
+                         visualize_dir=visualize_dir, mode=mode)
