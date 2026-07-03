@@ -42,63 +42,69 @@ class TrainVisCallback:
         return self._font
 
     def on_epoch_end(self, epoch):
-        import random
+        import random as _random
         raw_lines = self.dataset.data if hasattr(self.dataset, 'data') else []
         if not raw_lines:
             return
-        n_imgs = max(1, self.num_samples // 3)
-        chosen = random.sample(raw_lines, min(n_imgs, len(raw_lines)))
+        n_imgs = min(4, len(raw_lines))
+        chosen = _random.sample(raw_lines, n_imgs)
 
-        def _apply_aug(img):
+        def _train_augment(img):
             w, h = img.size
-            if random.random() < 0.5:
-                target = random.randint(640, 2560)
+            if _random.random() < 0.5:
+                target = _random.randint(640, 2560)
                 long_edge = max(w, h)
                 if long_edge != target:
                     s = target / long_edge
                     img = img.resize((int(w * s), int(h * s)), Image.LANCZOS)
             return img.resize((224, 224), Image.LANCZOS)
 
+        def _no_augment(img):
+            return img.resize((224, 224), Image.LANCZOS)
+
         rows = []
-        row = []
         for sample in chosen:
             resolved = self._resolve(sample.get("image", ""))
             if not resolved:
                 continue
             orig = Image.open(resolved).convert("RGB")
             ow, oh = orig.size
-            for _ in range(3):
-                aug = _apply_aug(orig.copy())
-                tile = Image.new("RGB", (224, 224), "white")
-                tile.paste(aug, (0, 0))
-                if _ == 1:
-                    draw = ImageDraw.Draw(tile)
-                    draw.text((2, 2), f"{ow}x{oh}", fill="red", font=self.font)
-                row.append(tile)
-                if len(row) == 8:
-                    rows.append(row)
-                    row = []
-        if row:
-            while len(row) < 8:
-                fill = Image.new("RGB", (224, 224), "gray")
-                row.append(fill)
-            rows.append(row)
+
+            # Row: no-aug baseline | aug x4 | aug x4 (different random)
+            tiles = [_no_augment(orig.copy())]  # baseline (no augment)
+            for _ in range(4):
+                tiles.append(_train_augment(orig.copy()))
+            # reset random state for next row
+            for _ in range(4):
+                tiles.append(_train_augment(orig.copy()))
+
+            # Label on first tile
+            tile0 = Image.new("RGB", (224, 224), "white")
+            tile0.paste(tiles[0], (0, 0))
+            draw = ImageDraw.Draw(tile0)
+            draw.text((2, 2), f"no aug", fill="red", font=self.font)
+            draw.text((2, 14), f"{ow}x{oh}", fill="red", font=self.font)
+            tiles[0] = tile0
+
+            rows.append(tiles)
 
         if not rows:
             return
+        grid_w = len(rows[0]) * 228
         grid_h = len(rows) * 228
-        grid_w = 8 * 228
         grid = Image.new("RGB", (grid_w, grid_h), "gray")
         y = 0
         for r in rows:
             x = 0
             for t in r:
-                grid.paste(t, (x, y))
+                tile = Image.new("RGB", (224, 224), "white")
+                tile.paste(t, (0, 0))
+                grid.paste(tile, (x, y))
                 x += 228
             y += 228
         out = os.path.join(self.save_dir, f"epoch_{epoch}.jpg")
         grid.save(out)
-        logger.info(f"Saved augmented batch vis: {out}")
+        logger.info(f"Saved training pipeline vis: {out}")
 
 
 class _DetectionTrainer(Trainer):
