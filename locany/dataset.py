@@ -10,6 +10,8 @@ from PIL import Image
 from .config import DataConfig
 from .utils import SPECIAL_TOKENS, COORD_TOKENS, load_image, logger
 
+AUG_LONG_EDGE_RANGE = (640, 2560)
+
 
 ROLE_MAP = {
     "user": "user",
@@ -100,19 +102,18 @@ def parse_sharegpt_line(
         return None
 
     try:
-        use_size = image_size
-        # Data augmentation: random scale crop for robustness
         if data_augment:
-            import random as _r
-            scale = _r.uniform(0.8, 1.0)
-            ih = int(image_size[0] * scale)
-            iw = int(image_size[1] * scale)
-            image = load_image(resolved, size=(ih, iw))
-            from torchvision import transforms as T
-            image = T.Compose([
-                T.Resize(image_size),
-                T.RandomCrop(image_size),
-            ])(image)
+            image = Image.open(resolved).convert("RGB")
+            w, h = image.size
+            if random.random() < 0.5:
+                long_edge = max(w, h)
+                target = random.randint(*AUG_LONG_EDGE_RANGE)
+                if long_edge != target:
+                    scale = target / long_edge
+                    nw = int(w * scale)
+                    nh = int(h * scale)
+                    image = image.resize((nw, nh), Image.LANCZOS)
+            image = image.resize(image_size, Image.LANCZOS)
         else:
             image = load_image(resolved, size=image_size)
     except Exception as e:
@@ -242,6 +243,7 @@ class DetectionDataset(Dataset):
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.image_size = image_size
+        self.image_dir = image_dir
 
         datasets = []
 

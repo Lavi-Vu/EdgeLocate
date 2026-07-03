@@ -6,12 +6,97 @@ from transformers import Trainer, TrainingArguments
 from torch.nn.utils.rnn import pad_sequence
 
 import json
+from PIL import Image, ImageDraw, ImageFont
 from .config import ModelConfig, TrainingConfig
 from .model import LocateAnythingForDetection
-from .utils import logger, set_seed
+from .utils import logger, set_seed, load_image
 
 
 IGNORE_INDEX = -100
+
+
+class TrainVisCallback:
+    """Saves original vs augmented training images at epoch end."""
+
+    def __init__(self, dataset, image_dir, save_dir, num_samples=8):
+        self.dataset = dataset
+        self.image_dir = image_dir
+        self.save_dir = save_dir
+        self.num_samples = num_samples
+        os.makedirs(save_dir, exist_ok=True)
+        self._font = None
+
+    def _resolve(self, path):
+        resolved = path if os.path.isabs(path) else os.path.join(self.image_dir, path)
+        if not os.path.exists(resolved):
+            resolved = os.path.join(self.image_dir, os.path.basename(path))
+        return resolved if os.path.exists(resolved) else None
+
+    @property
+    def font(self):
+        if self._font is None:
+            try:
+                self._font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 12)
+            except (OSError, IOError):
+                self._font = ImageFont.load_default()
+        return self._font
+
+    def on_epoch_end(self, epoch):
+        import random
+        raw_lines = self.dataset.data if hasattr(self.dataset, 'data') else []
+        if not raw_lines:
+            return
+        chosen = random.sample(raw_lines, min(self.num_samples, len(raw_lines)))
+        rows = []
+        row = []
+        for sample in chosen:
+            resolved = self._resolve(sample.get("image", ""))
+            if not resolved:
+                continue
+            orig = Image.open(resolved).convert("RGB")
+            ow, oh = orig.size
+
+            # Replicate training augmentation
+            aug = orig.copy()
+            w, h = aug.size
+            if random.random() < 0.5:
+                target = random.randint(640, 2560)
+                long_edge = max(w, h)
+                if long_edge != target:
+                    s = target / long_edge
+                    aug = aug.resize((int(w * s), int(h * s)), Image.LANCZOS)
+            aug = aug.resize((224, 224), Image.LANCZOS)
+            orig_thumb = orig.resize((224, 224), Image.LANCZOS)
+
+            tile = Image.new("RGB", (448, 224), "white")
+            tile.paste(orig_thumb, (0, 0))
+            tile.paste(aug, (224, 0))
+            draw = ImageDraw.Draw(tile)
+            draw.text((2, 2), f"orig {ow}x{oh}", fill="red", font=self.font)
+            draw.text((226, 2), f"aug {aug.size[0]}x{aug.size[1]}", fill="red", font=self.font)
+
+            row.append(tile)
+            if len(row) == 4:
+                rows.append(row)
+                row = []
+        if row:
+            rows.append(row)
+
+        if not rows:
+            return
+        grid_h = sum(228 for _ in rows)
+        grid_w = 4 * 452
+        grid = Image.new("RGB", (grid_w, grid_h), "gray")
+        y = 0
+        for r in rows:
+            x = 0
+            for t in r:
+                grid.paste(t, (x, y))
+                x += 452
+            y += 228
+        out = os.path.join(self.save_dir, f"epoch_{epoch}.jpg")
+        grid.save(out)
+        logger.info(f"Saved training batch vis: {out} ({len(chosen)} samples)")
 
 
 class _DetectionTrainer(Trainer):
@@ -96,6 +181,19 @@ def setup_training(model, model_cfg: ModelConfig, train_cfg: TrainingConfig,
         train_dataset=train_dataset, eval_dataset=eval_dataset,
         data_collator=data_collator, processing_class=processing_class,
     )
+
+    # Add training visualization callback (start + each epoch)
+    vis_dir = os.path.join(train_cfg.output_dir, "epoch_vis")
+    vis_cb = TrainVisCallback(train_dataset, train_dataset.image_dir, vis_dir)
+    trainer.add_callback(type('VisCB', (), {
+        'on_train_begin': lambda self, args, state, control, **kw: (
+            vis_cb.on_epoch_end(0)
+        ),
+        'on_epoch_end': lambda self, args, state, control, **kw: (
+            vis_cb.on_epoch_end(int(state.epoch))
+        ),
+    })())
+
     return trainer
 
 
