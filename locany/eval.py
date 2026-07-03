@@ -250,21 +250,23 @@ def run_benchmark(
                 all_recalls.append(0.0)
 
             # Save visualization for first N samples
-            if visualize > 0 and visualize_dir and len([k for k in pred_boxes_by_image if pred_boxes_by_image[k]]) <= visualize:
-                raw = dataset.data[img_id]
-                resolved = _resolve_image_path(raw["image"], image_dir)
-                if resolved:
-                    img = Image.open(resolved).convert("RGB")
-                    gt_text = ""
-                    for conv in raw.get("conversations", []):
-                        if conv.get("from") in ("gpt", "assistant"):
-                            gt_text = conv["value"]
-                            break
-                    gt_labels = [lb for lb, _ in parse_labels_and_boxes(gt_text)] if gt_text else []
-                    pred_labels = [lb for lb, _ in parse_labels_and_boxes(result["text"])] if result["text"] else []
-                    out_name = f"vis_{img_id}_{os.path.basename(resolved)}"
-                    out_path = os.path.join(visualize_dir, out_name)
-                    visualize_prediction(img, pred_boxes, gt_boxes, pred_labels, gt_labels, output_path=out_path)
+            if visualize > 0 and visualize_dir:
+                os.makedirs(visualize_dir, exist_ok=True)
+                if len([k for k in pred_boxes_by_image if pred_boxes_by_image[k]]) <= visualize:
+                    raw = dataset.data[img_id]
+                    resolved = _resolve_image_path(raw["image"], image_dir)
+                    if resolved:
+                        img = Image.open(resolved).convert("RGB")
+                        gt_text = ""
+                        for conv in raw.get("conversations", []):
+                            if conv.get("from") in ("gpt", "assistant"):
+                                gt_text = conv["value"]
+                                break
+                        gt_labels = [lb for lb, _ in parse_labels_and_boxes(gt_text)] if gt_text else []
+                        pred_labels = [lb for lb, _ in parse_labels_and_boxes(result["text"])] if result["text"] else []
+                        out_name = f"vis_{img_id}_{os.path.basename(resolved)}"
+                        out_path = os.path.join(visualize_dir, out_name)
+                        visualize_prediction(img, pred_boxes, gt_boxes, pred_labels, gt_labels, output_path=out_path)
 
         iterator.set_postfix({"samples": min(end_idx, num_samples)})
 
