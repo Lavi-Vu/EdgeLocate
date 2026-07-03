@@ -237,11 +237,10 @@ def run_benchmark(
         )
 
         for j, result in enumerate(batch_results):
-            pred_tokens_boxes = result["boxes"]
+            pred_boxes = result["boxes"]
             img_id = batch_ids[j]
             w, h = batch_sizes[j]
             gt_boxes = batch_gt_boxes_pixel[j]
-            pred_boxes = _denorm_boxes(pred_tokens_boxes, w, h) if pred_tokens_boxes else []
 
             pred_boxes_by_image[img_id] = pred_boxes
             gt_boxes_by_image[img_id] = gt_boxes

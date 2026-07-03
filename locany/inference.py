@@ -131,19 +131,18 @@ class DetectionInferenceEngine:
                 transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
             ])
 
-        text = texts[0] if texts else ""
-        if SPECIAL_TOKENS["image"] not in text:
-            if "<image>" in text:
-                text = text.replace("<image>", SPECIAL_TOKENS["image"])
-            else:
-                text = f"{SPECIAL_TOKENS['image']}\n{text}"
-
-        messages = [{"role": "user", "content": text}]
-        formatted = self.tokenizer.apply_chat_template(
-            messages, tokenize=True, add_generation_prompt=True, return_tensors="pt",
-        )
-        prompt_ids = formatted["input_ids"].to(self.device)
-        prompt_mask = torch.ones_like(prompt_ids)
+        prompt_data = []
+        for text in texts:
+            if SPECIAL_TOKENS["image"] not in text:
+                if "<image>" in text:
+                    text = text.replace("<image>", SPECIAL_TOKENS["image"])
+                else:
+                    text = f"{SPECIAL_TOKENS['image']}\n{text}"
+            messages = [{"role": "user", "content": text}]
+            formatted = self.tokenizer.apply_chat_template(
+                messages, tokenize=True, add_generation_prompt=True, return_tensors="pt",
+            )
+            prompt_data.append(formatted["input_ids"].to(self.device))
 
         gen_config = GenerationConfig(
             max_new_tokens=self.config.max_new_tokens, do_sample=False,
@@ -167,12 +166,19 @@ class DetectionInferenceEngine:
             else:
                 pixel_values = torch.stack([transform(img) for img in batch_imgs]).to(self.device)
 
-            batch_ids = prompt_ids.expand(len(batch_imgs), -1).contiguous()
-            batch_mask = prompt_mask.expand(len(batch_imgs), -1).contiguous()
+            batch_ids = prompt_data[i:i + batch_size]
+            max_len = max(p.shape[1] for p in batch_ids)
+            padded_ids = torch.full((len(batch_ids), max_len), self.tokenizer.pad_token_id,
+                                    dtype=torch.long, device=self.device)
+            padded_mask = torch.zeros((len(batch_ids), max_len), device=self.device)
+            for k, pids in enumerate(batch_ids):
+                slen = pids.shape[1]
+                padded_ids[k, :slen] = pids[0]
+                padded_mask[k, :slen] = 1
 
             outputs = self.model.generate(
-                pixel_values=pixel_values, input_ids=batch_ids,
-                attention_mask=batch_mask, generation_config=gen_config,
+                pixel_values=pixel_values, input_ids=padded_ids,
+                attention_mask=padded_mask, generation_config=gen_config,
             )
             full_ids = outputs.sequences if hasattr(outputs, "sequences") else outputs
             for j, seq in enumerate(full_ids):
