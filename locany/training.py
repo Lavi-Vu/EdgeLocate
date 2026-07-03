@@ -45,9 +45,12 @@ class TrainVisCallback:
     def on_epoch_end(self, epoch):
         raw_lines = self.dataset.data if hasattr(self.dataset, 'data') else []
         if not raw_lines:
+            logger.info(f"[epoch_vis] no data lines available, skipping")
             return
+        unique_paths = len(set(l.get("image","") for l in raw_lines))
         n_imgs = min(4, len(raw_lines))
         chosen = random.sample(raw_lines, n_imgs)
+        logger.info(f"[epoch_vis] {len(raw_lines)} lines, {unique_paths} unique paths, sampling {n_imgs}")
 
         def _maybe_augment(img):
             w, h = img.size
