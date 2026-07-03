@@ -5,6 +5,7 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
+from PIL import Image
 from tqdm import tqdm
 
 
@@ -151,10 +152,12 @@ def run_benchmark(
     max_samples: Optional[int] = None,
     iou_threshold: float = 0.5,
     batch_size: int = 8,
+    visualize: int = 0,
+    visualize_dir: Optional[str] = None,
 ) -> Dict[str, float]:
     from .config import InferenceConfig
-    from .inference import DetectionInferenceEngine
-    from .utils import parse_boxes_from_text
+    from .inference import DetectionInferenceEngine, visualize_prediction
+    from .utils import parse_boxes_from_text, parse_labels_and_boxes
 
     inf_cfg = InferenceConfig(max_new_tokens=512)
     engine = DetectionInferenceEngine(model, tokenizer, inf_cfg)
@@ -246,7 +249,28 @@ def run_benchmark(
                 all_precisions.append(0.0)
                 all_recalls.append(0.0)
 
+            # Save visualization for first N samples
+            if visualize > 0 and visualize_dir and len([k for k in pred_boxes_by_image if pred_boxes_by_image[k]]) <= visualize:
+                raw = dataset.data[img_id]
+                resolved = _resolve_image_path(raw["image"], image_dir)
+                if resolved:
+                    img = Image.open(resolved).convert("RGB")
+                    gt_text = ""
+                    for conv in raw.get("conversations", []):
+                        if conv.get("from") in ("gpt", "assistant"):
+                            gt_text = conv["value"]
+                            break
+                    gt_labels = [lb for lb, _ in parse_labels_and_boxes(gt_text)] if gt_text else []
+                    pred_labels = [lb for lb, _ in parse_labels_and_boxes(result["text"])] if result["text"] else []
+                    out_name = f"vis_{img_id}_{os.path.basename(resolved)}"
+                    out_path = os.path.join(visualize_dir, out_name)
+                    visualize_prediction(img, pred_boxes, gt_boxes, pred_labels, gt_labels, output_path=out_path)
+
         iterator.set_postfix({"samples": min(end_idx, num_samples)})
+
+    # Save visualization images
+    if visualize > 0 and visualize_dir:
+        os.makedirs(visualize_dir, exist_ok=True)
 
     results = {
         "num_samples": len(all_precisions),
@@ -347,6 +371,8 @@ def benchmark_on_jsonl(
     image_dir: str,
     max_samples: Optional[int] = None,
     batch_size: int = 8,
+    visualize: int = 0,
+    visualize_dir: Optional[str] = None,
 ) -> Dict[str, float]:
     from .dataset import DetectionDataset
     ds = DetectionDataset(
@@ -354,4 +380,6 @@ def benchmark_on_jsonl(
         image_dir=image_dir,
         tokenizer=tokenizer,
     )
-    return run_benchmark(model, tokenizer, ds, image_dir, max_samples=max_samples, batch_size=batch_size)
+    return run_benchmark(model, tokenizer, ds, image_dir, max_samples=max_samples,
+                         batch_size=batch_size, visualize=visualize,
+                         visualize_dir=visualize_dir)

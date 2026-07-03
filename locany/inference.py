@@ -204,3 +204,40 @@ def visualize_boxes(image: Image.Image, boxes: List[List[float]],
     if output_path:
         image.save(output_path)
     return image
+
+
+def visualize_prediction(image: Image.Image, pred_boxes: List[List[float]],
+                         gt_boxes: List[List[float]],
+                         pred_labels: Optional[List[str]] = None,
+                         gt_labels: Optional[List[str]] = None,
+                         output_path: Optional[str] = None) -> Image.Image:
+    """Draw predicted (red) and ground truth (green) boxes on the same image."""
+    draw = ImageDraw.Draw(image)
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 14)
+    except (OSError, IOError):
+        font = ImageFont.load_default()
+
+    for i, box in enumerate(gt_boxes):
+        x1, y1, x2, y2 = map(int, box)
+        draw.rectangle([x1, y1, x2, y2], outline="lime", width=2)
+        if gt_labels and i < len(gt_labels) and gt_labels[i]:
+            label = f"GT: {gt_labels[i]}"
+            bbox = draw.textbbox((0, 0), label, font=font)
+            tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+            draw.rectangle([x1, y1 - th - 2, x1 + tw + 2, y1], fill="lime")
+            draw.text((x1 + 1, y1 - th - 1), label, fill="black", font=font)
+
+    for i, box in enumerate(pred_boxes):
+        x1, y1, x2, y2 = map(int, box)
+        draw.rectangle([x1, y1, x2, y2], outline="red", width=3)
+        if pred_labels and i < len(pred_labels) and pred_labels[i]:
+            label = f"PRED: {pred_labels[i]}"
+            bbox = draw.textbbox((0, 0), label, font=font)
+            tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+            draw.rectangle([x1, y1 - th - 2, x1 + tw + 2, y1], fill="red")
+            draw.text((x1 + 1, y1 - th - 1), label, fill="white", font=font)
+
+    if output_path:
+        image.save(output_path)
+    return image

@@ -52,6 +52,8 @@ def main():
     parser.add_argument("--iou_threshold", type=float, default=0.5, help="IoU threshold")
     parser.add_argument("--batch_size", type=int, default=8, help="Batch size for faster eval")
     parser.add_argument("--output", default=None, help="Save results JSON")
+    parser.add_argument("--visualize", type=int, default=0,
+                        help="Number of images to save with predictions vs ground truth")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -70,12 +72,15 @@ def main():
     print(f"Max samples: {args.max_samples or 'all'}")
     print()
 
+    vis_dir = os.path.join(os.path.dirname(args.output or "."), "vis") if args.visualize else None
     results = benchmark_on_jsonl(
         model, tokenizer,
         jsonl_path=args.data,
         image_dir=image_dir,
         max_samples=args.max_samples,
         batch_size=args.batch_size,
+        visualize=args.visualize,
+        visualize_dir=vis_dir,
     )
 
     print("\n=== Results ===")
