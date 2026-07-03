@@ -14,80 +14,43 @@ flowchart TB
     subgraph VE["Vision Encoder"]
         direction TB
         VE_SEL{"VE type?"}
-        VE_SEL -->|"siglip/siglip2"| SIGLIP["SigLIP/SigLIP2<br/>resize → 224×224<br/>patch → (N, 768)"]
-        VE_SEL -->|"moonvit"| MOON["MoonViT<br/>native resolution<br/>27 layers, 2D RoPE<br/>patch merge → (N, 4×1152)"]
-        SIGLIP --> VE_OUT[("VE features<br/>(B, N, D_ve)")]
+        VE_SEL -->|"siglip/siglip2"| SIGLIP["SigLIP/SigLIP2<br/>resize → 224×224<br/>patch → (N, D_ve)"]
+        VE_SEL -->|"moonvit"| MOON["MoonViT<br/>native resolution<br/>27 layers, 2D RoPE<br/>patch merge → (N, 4×D_ve)"]
+        SIGLIP --> VE_OUT[("image features<br/>(B, N, D_ve)")]
         MOON --> VE_OUT
     end
 
-    subgraph Proj["MLP Projector"]
-        PROJ_SEL{"VE type?"}
-        PROJ_SEL -->|"siglip"| MLP2["MLPProjector<br/>Linear(D_ve, 896) → GELU<br/>→ Linear(896, 896)"]
-        PROJ_SEL -->|"moonvit"| MLP3["MoonViTProjector<br/>Linear(4×1152, 896) → LN<br/>→ GELU → Dropout<br/>→ Linear(896, 896)"]
-        VE_OUT --> PROJ_SEL
+    subgraph Proj["Projector"]
+        direction TB
+        VE_OUT --> P_SEL{"VE type?"}
+        P_SEL -->|"siglip"| MLP2["MLPProjector<br/>Linear(D_ve, LLM_dim) → GELU<br/>→ Linear(LLM_dim, LLM_dim)"]
+        P_SEL -->|"moonvit"| MLP3["MoonViTProjector<br/>Linear(4×D_ve, LLM_dim) → LN<br/>→ GELU → Dropout<br/>→ Linear(LLM_dim, LLM_dim)"]
     end
 
-    subgraph Tokenizer["Tokenizer"]
-        TOK["Qwen2.5 Tokenizer<br/>+ 1009 special tokens<br/>&lt;0&gt;–&lt;1000&gt;, &lt;box&gt;, ..."]
-        TXT --> TOK
-        TOK --> EMB["Embedding<br/>(vocab → 896)"]
+    subgraph TextEmbed["Text Embedding"]
+        TXT --> TOK["Tokenizer<br/>+ special tokens"]
+        TOK --> EMB["Embedding<br/>vocab → LLM_dim"]
     end
 
     subgraph LLM["Language Model"]
-        MERGE["<b>Visual features replace<br/>&lt;|image|&gt; anchor</b>"]
+        MERGE["replace &lt;|image|&gt;<br/>with projected features"]
         MLP2 --> MERGE
         MLP3 --> MERGE
         EMB --> MERGE
-        MERGE --> QWEN["Qwen2.5-0.5B<br/>+ LoRA (r=128)<br/>12 layers, 896 dim"]
+        MERGE --> QWEN["Qwen2.5-0.5B<br/>+ LoRA (r=128)<br/>12 layers, LLM_dim"]
     end
 
     subgraph Head["Output"]
-        LMH["LM Head<br/>(untied, 896 → vocab)<br/>argmax/sample"]
-        QWEN --> LMH
-    end
-
-    subgraph Training["Training Path"]
-        CE_LABELS[("Labels<br/>assistant tokens<br/>+ coord tokens")]
-        CE["Cross-Entropy Loss<br/>(on assistant span only)"]
-        LMH --> CE
-        CE_LABELS --> CE
-        CE --> GRAD["Gradient → LoRA<br/>+ Projector + LM Head"]
-    end
-
-    subgraph GenInfer["Generation / Evaluation Path"]
-        direction TB
-        GEN_MODE{"mode?"}
-        LMH --> GEN_MODE
-        GEN_MODE -->|"slow"| AR["Standard model.generate()<br/>autoregressive"]
-        GEN_MODE -->|"fast/hybrid"| PBD["generate_pbd()<br/>MTP mask → block_size=6<br/>decode_bbox_avg()"]
-        AR --> TOKENS[("Token IDs")]
-        PBD --> TOKENS
-        TOKENS --> DEC["Decode<br/>tokenizer.decode()"]
-        DEC --> PARSE["parse_boxes_from_text()<br/>regex on &lt;ref&gt;&lt;box&gt;"]
-        PARSE --> DENORM["Denormalize<br/>coord × img_dim / 1000"]
-        DENORM --> METRICS["COCO Metrics<br/>AP@0.50:0.95, F1"]
-    end
-
-    subgraph Augment["Data Augmentation (train only)"]
-        AUG_IMG["Load original resolution"]
-        AUG_COIN{"random 50%?"}
-        AUG_IMG --> AUG_COIN
-        AUG_COIN -->|"yes"| AUG_RESIZE["Resize long edge → [640, 2560]<br/>preserve aspect ratio"]
-        AUG_COIN -->|"no"| AUG_SKIP["Keep original size"]
-        AUG_RESIZE --> AUG_FINAL["Resize → 224×224<br/>ToTensor + Normalize<br/>mean=0.5, std=0.5"]
-        AUG_SKIP --> AUG_FINAL
-        AUG_FINAL --> IMG
+        QWEN --> LMH["LM Head<br/>(untied, LLM_dim → vocab)"]
+        LMH --> LOGITS[("logits<br/>(B, seq, vocab)")]
     end
 
     style Input fill:#e1f5fe
     style VE fill:#f3e5f5
     style Proj fill:#fff3e0
-    style Tokenizer fill:#e8f5e9
+    style TextEmbed fill:#e8f5e9
     style LLM fill:#ffebee
     style Head fill:#fce4ec
-    style Training fill:#e0f2f1
-    style GenInfer fill:#f1f8e9
-    style Augment fill:#fff8e1
 ```
 
 ## Files
