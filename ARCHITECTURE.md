@@ -5,45 +5,48 @@ EdgeLocate is a vision-language detection model (<1B params) ported from NVIDIA'
 ## Model Architecture
 
 ```mermaid
-flowchart TB
+flowchart LR
     subgraph Input["Input"]
-        IMG[("Image<br/>(H×W)")]
-        TXT[("Text<br/>user prompt")]
+        IMG[("Image")]
+        TXT[("Text prompt")]
     end
 
     subgraph VE["Vision Encoder"]
-        direction TB
-        VE_SEL{"VE type?"}
-        VE_SEL -->|"siglip/siglip2"| SIGLIP["SigLIP/SigLIP2<br/>resize → 224×224<br/>patch → (N, D_ve)"]
-        VE_SEL -->|"moonvit"| MOON["MoonViT<br/>native resolution<br/>27 layers, 2D RoPE<br/>patch merge → (N, 4×D_ve)"]
-        SIGLIP --> VE_OUT[("image features<br/>(B, N, D_ve)")]
-        MOON --> VE_OUT
+        PRE["preprocess<br/>(resize, normalize)"] --> VE_SEL{"VE type?"}
+        VE_SEL -->|"siglip"| SIGLIP["SigLIP<br/>patch → (N, 768)"]
+        VE_SEL -->|"siglip2"| SIGLIP2["SigLIP2<br/>patch embed: Linear<br/>manual patchify"]
+        VE_SEL -->|"moonvit"| MOON["MoonViT<br/>27 layers, 2D RoPE<br/>patch merge → (N, 4×1152)"]
+        SIGLIP --> OUT[("vis features")]
+        SIGLIP2 --> OUT
+        MOON --> OUT
     end
 
     subgraph Proj["Projector"]
-        direction TB
-        VE_OUT --> P_SEL{"VE type?"}
-        P_SEL -->|"siglip"| MLP2["MLPProjector<br/>Linear(D_ve, LLM_dim) → GELU<br/>→ Linear(LLM_dim, LLM_dim)"]
-        P_SEL -->|"moonvit"| MLP3["MoonViTProjector<br/>Linear(4×D_ve, LLM_dim) → LN<br/>→ GELU → Dropout<br/>→ Linear(LLM_dim, LLM_dim)"]
+        OUT --> P_SEL{"VE dim?"}
+        P_SEL -->|768| MLP2["MLPProjector<br/>Linear(768,896)→GELU→Linear(896,896)"]
+        P_SEL -->|"4×1152"| MLP3["MoonViTProjector<br/>Linear(4608,896)→LN→GELU→Dropout→Linear(896,896)"]
     end
 
     subgraph TextEmbed["Text Embedding"]
-        TXT --> TOK["Tokenizer<br/>+ special tokens"]
-        TOK --> EMB["Embedding<br/>vocab → LLM_dim"]
+        TXT --> TOK["Tokenizer<br/>(+ special tokens)"]
+        TOK --> EMB["Embedding<br/>vocab → 896"]
     end
 
     subgraph LLM["Language Model"]
-        MERGE["replace &lt;|image|&gt;<br/>with projected features"]
+        MERGE["merge: projected vis feats<br/>replace &lt;|image|&gt; embeddings"]
+        EMB --> MERGE
         MLP2 --> MERGE
         MLP3 --> MERGE
-        EMB --> MERGE
-        MERGE --> QWEN["Qwen2.5-0.5B<br/>+ LoRA (r=128)<br/>12 layers, LLM_dim"]
+        MERGE --> QWEN["Qwen2.5-0.5B  + LoRA<br/>12 layers, 896 dim"]
     end
 
     subgraph Head["Output"]
-        QWEN --> LMH["LM Head<br/>(untied, LLM_dim → vocab)"]
+        QWEN --> LMH["LM Head<br/>(untied, 896 → vocab)"]
         LMH --> LOGITS[("logits<br/>(B, seq, vocab)")]
     end
+
+    IMG --> PRE
+```
 
     style Input fill:#e1f5fe
     style VE fill:#f3e5f5
