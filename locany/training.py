@@ -46,7 +46,19 @@ class TrainVisCallback:
         raw_lines = self.dataset.data if hasattr(self.dataset, 'data') else []
         if not raw_lines:
             return
-        chosen = random.sample(raw_lines, min(self.num_samples, len(raw_lines)))
+        n_imgs = max(1, self.num_samples // 3)
+        chosen = random.sample(raw_lines, min(n_imgs, len(raw_lines)))
+
+        def _apply_aug(img):
+            w, h = img.size
+            if random.random() < 0.5:
+                target = random.randint(640, 2560)
+                long_edge = max(w, h)
+                if long_edge != target:
+                    s = target / long_edge
+                    img = img.resize((int(w * s), int(h * s)), Image.LANCZOS)
+            return img.resize((224, 224), Image.LANCZOS)
+
         rows = []
         row = []
         for sample in chosen:
@@ -55,48 +67,38 @@ class TrainVisCallback:
                 continue
             orig = Image.open(resolved).convert("RGB")
             ow, oh = orig.size
-
-            # Replicate training augmentation
-            aug = orig.copy()
-            w, h = aug.size
-            if random.random() < 0.5:
-                target = random.randint(640, 2560)
-                long_edge = max(w, h)
-                if long_edge != target:
-                    s = target / long_edge
-                    aug = aug.resize((int(w * s), int(h * s)), Image.LANCZOS)
-            aug = aug.resize((224, 224), Image.LANCZOS)
-            orig_thumb = orig.resize((224, 224), Image.LANCZOS)
-
-            tile = Image.new("RGB", (448, 224), "white")
-            tile.paste(orig_thumb, (0, 0))
-            tile.paste(aug, (224, 0))
-            draw = ImageDraw.Draw(tile)
-            draw.text((2, 2), f"orig {ow}x{oh}", fill="red", font=self.font)
-            draw.text((226, 2), f"aug {aug.size[0]}x{aug.size[1]}", fill="red", font=self.font)
-
-            row.append(tile)
-            if len(row) == 4:
-                rows.append(row)
-                row = []
+            for _ in range(3):
+                aug = _apply_aug(orig.copy())
+                tile = Image.new("RGB", (224, 224), "white")
+                tile.paste(aug, (0, 0))
+                if _ == 1:
+                    draw = ImageDraw.Draw(tile)
+                    draw.text((2, 2), f"{ow}x{oh}", fill="red", font=self.font)
+                row.append(tile)
+                if len(row) == 8:
+                    rows.append(row)
+                    row = []
         if row:
+            while len(row) < 8:
+                fill = Image.new("RGB", (224, 224), "gray")
+                row.append(fill)
             rows.append(row)
 
         if not rows:
             return
-        grid_h = sum(228 for _ in rows)
-        grid_w = 4 * 452
+        grid_h = len(rows) * 228
+        grid_w = 8 * 228
         grid = Image.new("RGB", (grid_w, grid_h), "gray")
         y = 0
         for r in rows:
             x = 0
             for t in r:
                 grid.paste(t, (x, y))
-                x += 452
+                x += 228
             y += 228
         out = os.path.join(self.save_dir, f"epoch_{epoch}.jpg")
         grid.save(out)
-        logger.info(f"Saved training batch vis: {out} ({len(chosen)} samples)")
+        logger.info(f"Saved augmented batch vis: {out}")
 
 
 class _DetectionTrainer(Trainer):
