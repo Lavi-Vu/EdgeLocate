@@ -1,8 +1,9 @@
 import os
+import random
 from typing import Optional
 
 import torch
-from transformers import Trainer, TrainingArguments
+from transformers import Trainer, TrainingArguments, TrainerCallback
 from torch.nn.utils.rnn import pad_sequence
 
 import json
@@ -42,24 +43,20 @@ class TrainVisCallback:
         return self._font
 
     def on_epoch_end(self, epoch):
-        import random as _random
         raw_lines = self.dataset.data if hasattr(self.dataset, 'data') else []
         if not raw_lines:
             return
         n_imgs = min(4, len(raw_lines))
-        chosen = _random.sample(raw_lines, n_imgs)
+        chosen = random.sample(raw_lines, n_imgs)
 
-        def _train_augment(img):
+        def _maybe_augment(img):
             w, h = img.size
-            if _random.random() < 0.5:
-                target = _random.randint(640, 2560)
+            if random.random() < 0.5:
+                target = random.randint(640, 2560)
                 long_edge = max(w, h)
                 if long_edge != target:
                     s = target / long_edge
                     img = img.resize((int(w * s), int(h * s)), Image.LANCZOS)
-            return img.resize((224, 224), Image.LANCZOS)
-
-        def _no_augment(img):
             return img.resize((224, 224), Image.LANCZOS)
 
         rows = []
@@ -70,38 +67,32 @@ class TrainVisCallback:
             orig = Image.open(resolved).convert("RGB")
             ow, oh = orig.size
 
-            # Row: no-aug baseline | aug x4 | aug x4 (different random)
-            tiles = [_no_augment(orig.copy())]  # baseline (no augment)
-            for _ in range(4):
-                tiles.append(_train_augment(orig.copy()))
-            # reset random state for next row
-            for _ in range(4):
-                tiles.append(_train_augment(orig.copy()))
-
-            # Label on first tile
-            tile0 = Image.new("RGB", (224, 224), "white")
-            tile0.paste(tiles[0], (0, 0))
-            draw = ImageDraw.Draw(tile0)
+            tiles = []
+            # Tile 0: no-augment baseline
+            base = Image.new("RGB", (224, 224), "white")
+            base.paste(orig.resize((224, 224), Image.LANCZOS), (0, 0))
+            draw = ImageDraw.Draw(base)
             draw.text((2, 2), f"no aug", fill="red", font=self.font)
             draw.text((2, 14), f"{ow}x{oh}", fill="red", font=self.font)
-            tiles[0] = tile0
+            tiles.append(base)
+
+            # Tiles 1-8: 8 independent augmentations
+            for _ in range(8):
+                aug = _maybe_augment(orig.copy())
+                tile = Image.new("RGB", (224, 224), "white")
+                tile.paste(aug, (0, 0))
+                tiles.append(tile)
 
             rows.append(tiles)
 
         if not rows:
             return
-        grid_w = len(rows[0]) * 228
+        grid_w = 9 * 228
         grid_h = len(rows) * 228
         grid = Image.new("RGB", (grid_w, grid_h), "gray")
-        y = 0
-        for r in rows:
-            x = 0
-            for t in r:
-                tile = Image.new("RGB", (224, 224), "white")
-                tile.paste(t, (0, 0))
-                grid.paste(tile, (x, y))
-                x += 228
-            y += 228
+        for ri, r in enumerate(rows):
+            for ci, t in enumerate(r):
+                grid.paste(t, (ci * 228 + 2, ri * 228 + 2))
         out = os.path.join(self.save_dir, f"epoch_{epoch}.jpg")
         grid.save(out)
         logger.info(f"Saved training pipeline vis: {out}")
@@ -192,15 +183,18 @@ def setup_training(model, model_cfg: ModelConfig, train_cfg: TrainingConfig,
 
     # Add training visualization callback (start + each epoch)
     vis_dir = os.path.join(train_cfg.output_dir, "epoch_vis")
-    vis_cb = TrainVisCallback(train_dataset, train_dataset.image_dir, vis_dir)
-    trainer.add_callback(type('VisCB', (), {
-        'on_train_begin': lambda self, args, state, control, **kw: (
-            vis_cb.on_epoch_end(0)
-        ),
-        'on_epoch_end': lambda self, args, state, control, **kw: (
-            vis_cb.on_epoch_end(int(state.epoch))
-        ),
-    })())
+    _vis_helper = TrainVisCallback(train_dataset, train_dataset.image_dir, vis_dir)
+
+    class _VisCB(TrainerCallback):
+        def on_train_begin(self, args, state, control, **kwargs):
+            _vis_helper.on_epoch_end(0)
+            return control
+
+        def on_epoch_end(self, args, state, control, **kwargs):
+            _vis_helper.on_epoch_end(int(state.epoch))
+            return control
+
+    trainer.add_callback(_VisCB())
 
     return trainer
 
