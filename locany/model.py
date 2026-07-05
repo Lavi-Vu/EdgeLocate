@@ -551,7 +551,7 @@ class LocateAnythingForDetection(PreTrainedModel):
     def generate_pbd(self, pixel_values=None, input_ids=None, attention_mask=None,
                       tokenizer=None, generation_mode='hybrid', max_new_tokens=512,
                       temperature=0.0, top_p=1.0, block_size=6, keep_k_avg=4, verbose=False):
-        """Parallel Box Decoding (PBD) generation with MTP. Supports hybrid/fast/slow modes."""
+        """Parallel Box Decoding (PBD) generation with MTP. Works with any VE (SigLIP, SigLIP2, MoonViT)."""
         device = input_ids.device
         batch_size, seq_len = input_ids.shape
         assert batch_size == 1, "PBD only supports batch_size=1"

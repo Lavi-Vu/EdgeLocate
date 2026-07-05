@@ -37,6 +37,8 @@ def main():
     parser.add_argument("--max_new_tokens", type=int, default=256)
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top_p", type=float, default=1.0)
+    parser.add_argument("--mode", default="hybrid", choices=["fast", "hybrid", "slow"],
+                        help="Generation mode: fast (PBD only), hybrid (PBD+AR fallback), slow (AR only)")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -63,6 +65,7 @@ def main():
         max_new_tokens=args.max_new_tokens,
         temperature=args.temperature,
         top_p=args.top_p,
+        mode=args.mode,
     )
 
     engine = DetectionInferenceEngine(model, tokenizer, infer_cfg)

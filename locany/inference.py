@@ -57,8 +57,8 @@ class DetectionInferenceEngine:
         max_new = max_new_tokens or self.config.max_new_tokens
 
         generation_mode = self.config.mode
-        if generation_mode != 'slow' and is_moonvit:
-            # Use PBD generation for MoonViT
+        if generation_mode != 'slow':
+            # Use PBD generation
             generated_ids = self.model.generate_pbd(
                 pixel_values=pixel_values, input_ids=input_ids,
                 attention_mask=attention_mask, tokenizer=self.tokenizer,

@@ -163,7 +163,7 @@ python evaluate.py --model_dir ./outputs --data ./val.jsonl --image_dir . --mode
 python evaluate.py --model_dir ./outputs --data ./val.jsonl --image_dir . --mode slow
 ```
 
-PBD modes (`fast`/`hybrid`) require a MoonViT vision encoder; `slow` works with any VE.
+PBD modes (`fast`/`hybrid`) work with any vision encoder; `slow` is pure autoregressive for backward compatibility.
 
 ### Visualize predictions
 ```bash
@@ -212,7 +212,7 @@ Controlled by `--mode` flag (`--generation_mode` in train.py's model group):
 | `fast` | Pure MTP — all tokens predicted in blocks of `block_size=6`. | Fastest | No |
 | `slow` | Standard autoregressive token-by-token via `model.generate()`. | Baseline | N/A |
 
-PBD dispatch rule: `mode != 'slow' AND VE is MoonViT` → `model.generate_pbd()`. Otherwise → `model.generate()`.
+PBD dispatch rule: `mode != 'slow'` → `model.generate_pbd()`. Otherwise → `model.generate()`.
 
 ## Data Format
 

@@ -264,7 +264,7 @@ The vision encoder converts raw pixels into patch-level feature vectors. Three e
 | **Output dim** | 768 | 768 | 1152 (4608 after merge) |
 | **Layers** | 24 | 24 | 27 |
 | **Position encoding** | Learned 1D | Learned 1D (interpolated) | 2D RoPE |
-| **PBD support** | No | No | **Yes** |
+| **PBD support** | Yes | Yes | Yes |
 
 ### 5.2 SigLIP Path
 
@@ -302,7 +302,7 @@ $$ \mathbf{Z}'_{i,j} = \text{Conv2d}_{2\times2}(\mathbf{Z}_{2i:2i+2, 2j:2j+2}) \
 Output has $1/4$ the spatial size but $4\times$ the channel width (4608 = 1152 × 4). These merged tokens form the final visual features that are projected to the LLM's embedding space.
 - **Native Resolution**: Can process images at their original resolution (or tiles thereof), avoiding the information loss from aggressive downsampling.
 
-MoonViT is the only encoder that supports PBD, because the patch merge step produces tokens that naturally group into spatial regions — aligning with the block decoding pattern.
+PBD works with any vision encoder since it operates on the projected visual features in the LLM's embedding space, independent of the encoder architecture.
 
 ---
 
@@ -703,7 +703,7 @@ TRAINABLE (~37M params total):
 1. **Image preprocessing**: Resize to model input size + normalize
 2. **Prompt formatting**: Prepend `<|image|>\n` to text, apply chat template
 3. **Generation dispatch**:
-   - If MoonViT + mode ≠ slow → `generate_pbd()` (parallel)
+   - If mode ≠ slow → `generate_pbd()` (parallel)
    - Otherwise → `model.generate()` (autoregressive)
 4. **Text decoding**: Token IDs → text
 5. **Box parsing**: Regex extract patterns:
@@ -762,16 +762,16 @@ The `visualize_prediction()` function draws GT boxes (green) and predicted boxes
 ### 12.1 Supported Configurations
 
 | Variant | VE | LLM | Trainable | VRAM | PBD |
-|---|---|---|---|---|---|
-| SigLIP Base | `siglip-base-patch16-224` (93M) | Qwen2.5-0.5B | ~37M | ~4 GB | No |
-| SigLIP2 Base | `siglip2-base-patch16-224` (98M) | Qwen2.5-0.5B | ~37M | ~4 GB | No |
+|---|---|---|---|---|---|---|
+| SigLIP Base | `siglip-base-patch16-224` (93M) | Qwen2.5-0.5B | ~37M | ~4 GB | Yes |
+| SigLIP2 Base | `siglip2-base-patch16-224` (98M) | Qwen2.5-0.5B | ~37M | ~4 GB | Yes |
 | MoonViT | MoonViT (408M) | Qwen2.5-0.5B | ~44M | ~8 GB | Yes |
-| + VE LoRA | Any + LoRA r=16 | Qwen2.5-0.5B | ~40–47M | +1 GB | Depends |
-| + Packing | Any | Qwen2.5-0.5B | ~37M | ~4–8 GB | Depends |
+| + VE LoRA | Any + LoRA r=16 | Qwen2.5-0.5B | ~40–47M | +1 GB | Yes |
+| + Packing | Any | Qwen2.5-0.5B | ~37M | ~4–8 GB | Yes |
 
 ### 12.2 Trade-offs
 
-- **SigLIP vs MoonViT**: SigLIP is lighter and faster for inference but doesn't support PBD. MoonViT supports native resolution and PBD but is 4× larger in the vision encoder.
+- **SigLIP vs MoonViT**: SigLIP is lighter and faster for inference. MoonViT supports native resolution and is 4× larger in the vision encoder. Both support PBD.
 - **LoRA rank**: Default 128 is good for general detection. Higher rank (e.g., 256) captures more task-specific features at the cost of more parameters. Lower rank (64) for limited VRAM.
 - **With vs without packing**: Packing increases training throughput by 1.5–2× but disables visual feature merge (uses raw `input_ids` instead of merged embeddings). Currently experimental.
 - **Generation mode**: `hybrid` is recommended for production — nearly as fast as `fast` but handles edge cases robustly. `slow` for maximum compatibility. `fast` for maximum speed on clean data.

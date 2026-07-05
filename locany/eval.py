@@ -169,7 +169,7 @@ def run_benchmark(
 
     inf_cfg = InferenceConfig(max_new_tokens=512, mode=mode)
     engine = DetectionInferenceEngine(model, tokenizer, inf_cfg)
-    use_pbd = mode != "slow" and getattr(model, "is_moonvit", False)
+    use_pbd = mode != "slow"
 
     pred_boxes_by_image = {}
     gt_boxes_by_image = {}

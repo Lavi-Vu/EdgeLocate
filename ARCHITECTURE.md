@@ -133,8 +133,8 @@ Three encoder paths are supported, auto-detected at model load:
 
 | Encoder | Resolution | Output Dim | Preprocessing | PBD Support |
 |---|---|---|---|---|
-| SigLIP | 224×224 | 768 | Resize + normalize | No |
-| SigLIP2 | 224×224 (or naflex) | 768 | Resize + normalize, manual patchify | No |
+| SigLIP | 224×224 | 768 | Resize + normalize | Yes |
+| SigLIP2 | 224×224 (or naflex) | 768 | Resize + normalize, manual patchify | Yes |
 | MoonViT | Native | 1152 (×4 after merge) | Tile-align, patchify | Yes |
 
 ### SigLIP (`VisionEncoderWrapper`)
@@ -152,7 +152,7 @@ Similar to SigLIP but with special handling in transformers 5.12.1:
 - **2D RoPE**: Rotary position embeddings applied in 2D grid space (not 1D sequence), enabling variable-resolution generalization
 - **Patch merge**: After the encoder, a 2×2 kernel merges adjacent patches → output `(H/14/2)×(W/14/2)` tokens with 4× channel width (4608 dim)
 - **Auto-detection**: Triggered by `config.model_type == "moonvit"` or model name containing "moonvit"
-- **Required** for PBD generation (the `generate_pbd()` method only dispatches when `is_moonvit=True`)
+- **PBD acceleration**: Parallel box decoding works with any vision encoder; MoonViT benefits most from PBD due to its higher resolution and larger patch count.
 
 ---
 
@@ -287,7 +287,7 @@ The 6 decoded tokens are classified into pattern types:
 
 | Mode | Behavior | Speed | When to use |
 |---|---|---|---|
-| `fast` | Always MTP, never falls back | Fastest | MoonViT only, when output quality is reliable |
+| `fast` | Always MTP, never falls back | Fastest | When output quality is reliable and maximum speed needed |
 | `hybrid` (default) | MTP for box tokens, falls back to AR on `error_box`, resumes MTP after `</box>` | Fast | Recommended — balances speed and robustness |
 | `slow` | Pure autoregressive (`model.generate()`) | Baseline | Any VE, backward compatibility |
 
@@ -295,13 +295,13 @@ The 6 decoded tokens are classified into pattern types:
 
 ```python
 def predict(image, text):
-    if config.mode != 'slow' and model.is_moonvit:
+    if config.mode != 'slow':
         model.generate_pbd(...)
     else:
         model.generate(...)  # standard HF GenerationConfig
 ```
 
-`predict_batch()` does not support PBD. When PBD is selected in `eval.py` (`--mode hybrid/fast` with MoonViT), it falls back to single-image `predict()` calls in a loop.
+`predict_batch()` does not support PBD. When PBD is selected in `eval.py` (`--mode hybrid/fast`), it falls back to single-image `predict()` calls in a loop.
 
 ---
 
@@ -392,5 +392,5 @@ Standard COCO evaluation computed in `eval.py`:
 - **Optional VE LoRA** (`--use_backbone_lora N`): Enables fine-grained visual feature adaptation without full VE fine-tuning.
 - **Untied LM head** (`tie_word_embeddings=False`): Allows coordinate token LM head to train independently from the input embedding matrix.
 - **Frozen VE by default**: Saves memory (VE is 93–408M params); projector + LoRA adapt visual features to LLM space.
-- **PBD over pure AR**: Parallel box decoding with MTP masks provides 2–4× speedup on MoonViT while maintaining accuracy through `decode_bbox_avg()` and hybrid fallback.
+- **PBD over pure AR**: Parallel box decoding with MTP masks provides significant speedup over pure autoregressive generation while maintaining accuracy through `decode_bbox_avg()` and hybrid fallback.
 - **1000 bins over 100–10000**: 1000 bins provides ~0.22 pixel precision at 224×224 resolution — sufficient for detection while keeping vocabulary size manageable.
