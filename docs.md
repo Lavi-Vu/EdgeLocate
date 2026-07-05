@@ -91,6 +91,18 @@ Why discrete tokens rather than an MSE regression head?
 - **No task-specific heads**: The same LM head predicts both text tokens and coordinate tokens — no need for separate regression, classification, or object query modules
 - **Natural multi-box support**: The autoregressive generation loop naturally produces variable-length box sequences without predefined maximums
 
+**Loss formulation**. At training time, the model minimizes the negative log-likelihood of the ground-truth token sequence. For a sequence of length $T$ with labels $y_t$ (where $y_t = -100$ for masked positions), the loss is:
+
+$$ \mathcal{L} = -\frac{1}{\sum_t \mathbb{1}[y_t \neq -100]} \sum_{t=1}^{T} \mathbb{1}[y_t \neq -100] \cdot \log p(y_t \mid x_{<t}) $$
+
+where $p(y_t \mid x_{<t}) = \text{softmax}(\mathbf{W}_{\text{lm}} \mathbf{h}_t)$ is the probability assigned to the correct token $y_t$ by the LM head given the LLM's hidden state $\mathbf{h}_t$ at position $t$.
+
+In contrast, a standard regression-based detection model would use:
+
+$$ \mathcal{L}_{\text{reg}} = \sum_{i} \| \mathbf{b}_i - \hat{\mathbf{b}}_i \|_2^2 $$
+
+where $\mathbf{b}_i$ is the $i$-th ground-truth box and $\hat{\mathbf{b}}_i$ is the predicted box. This only provides gradients to the regression head and the features it directly consumes — a much shallower gradient path.
+
 ### 2.3 Frozen + Adapter Paradigm
 
 The base components (VE and LLM) are frozen to save memory. Only lightweight adapters are trained:
@@ -178,28 +190,61 @@ The final sequence the LLM sees:
 
 This is done per-sample, so each sequence may have a different length after merge.
 
-### 4.2 LoRA (Low-Rank Adaptation)
+### 4.2 Multi-Head Attention
 
-LoRA decomposes weight updates into low-rank matrices:
+The core attention operation in both the LLM and vision encoder is **scaled dot-product attention**. Given queries $\mathbf{Q} \in \mathbb{R}^{T \times d_k}$, keys $\mathbf{K} \in \mathbb{R}^{T \times d_k}$, and values $\mathbf{V} \in \mathbb{R}^{T \times d_v}$:
 
-```
-W' = W + BA    where B ∈ R^(d×r), A ∈ R^(r×k), r=128
-```
+$$ \text{Attention}(\mathbf{Q}, \mathbf{K}, \mathbf{V}) = \text{softmax}\left( \frac{\mathbf{Q} \mathbf{K}^\top}{\sqrt{d_k}} + \mathbf{M} \right) \mathbf{V} $$
 
+where $\mathbf{M}$ is the attention mask ($0$ for allowed positions, $-\infty$ for masked positions). **Multi-head attention** runs $H$ parallel attention heads and concatenates:
+
+$$ \begin{aligned}
+\text{head}_i &= \text{Attention}(\mathbf{Q} \mathbf{W}_i^Q, \mathbf{K} \mathbf{W}_i^K, \mathbf{V} \mathbf{W}_i^V) \\[2pt]
+\text{MHA}(\mathbf{Q}, \mathbf{K}, \mathbf{V}) &= \text{Concat}(\text{head}_1, \ldots, \text{head}_H) \mathbf{W}^O
+\end{aligned} $$
+
+The LLM uses **Grouped Query Attention (GQA)** with 14 query heads and 2 key/value heads — reducing KV cache size during inference by sharing KV projections across groups of query heads. The vision encoder uses standard multi-head self-attention ($\mathbf{Q} = \mathbf{K} = \mathbf{V}$).
+
+### 4.3 LoRA (Low-Rank Adaptation)
+
+LoRA freezes the pre-trained weight matrix $\mathbf{W}_0 \in \mathbb{R}^{d \times k}$ and injects a trainable low-rank decomposition:
+
+$$ \mathbf{W}' = \mathbf{W}_0 + \Delta \mathbf{W} = \mathbf{W}_0 + \mathbf{B} \mathbf{A} $$
+
+where $\mathbf{B} \in \mathbb{R}^{d \times r}$, $\mathbf{A} \in \mathbb{R}^{r \times k}$, and the rank $r \ll \min(d, k)$. During training:
+
+$$ \mathbf{h} = \mathbf{W}' \mathbf{x} = \mathbf{W}_0 \mathbf{x} + \frac{\alpha}{r} \mathbf{B} \mathbf{A} \mathbf{x} $$
+
+- **Scale factor**: $\alpha / r = 256 / 128 = 2$ controls the magnitude of the update
+- **Initialization**: $\mathbf{A} \sim \mathcal{N}(0, \sigma^2)$, $\mathbf{B} = \mathbf{0}$ (so $\Delta \mathbf{W} = \mathbf{0}$ at start)
 - Applied to all 6 linear projection types in each transformer layer: `q_proj`, `k_proj`, `v_proj`, `o_proj`, `gate_proj`, `up_proj`, `down_proj`
-- Scale factor: alpha/r = 256/128 = 2×
 - Only BA matrices are trained; original W stays frozen
 - Saves ~459M parameters from being trained
 
-### 4.3 Attention Types
-
-The LLM uses **Grouped Query Attention (GQA)** with 14 query heads and 2 key/value heads — reducing KV cache size during inference. The vision encoder uses standard multi-head self-attention.
-
 ### 4.4 Positional Encoding
 
-- **LLM**: 1D Rotary Position Embeddings (RoPE) with θ=1,000,000 for 32K context
-- **SigLIP/SigLIP2**: Learned 1D absolute position embeddings (196 or 256 positions)
-- **MoonViT**: 2D Rotary Position Embeddings applied in grid space — supports variable resolution natively
+**LLM — 1D Rotary Position Embeddings (RoPE)**. RoPE applies a rotation to the query and key vectors based on their position $p$ in the sequence. For a vector $\mathbf{x}$ at position $p$, the rotary transformation for dimension pair $(2i, 2i+1)$ is:
+
+$$ \begin{aligned}
+    \text{RoPE}(\mathbf{x}, p)_{2i} &= x_{2i} \cos(p \theta_i) - x_{2i+1} \sin(p \theta_i) \\[2pt]
+    \text{RoPE}(\mathbf{x}, p)_{2i+1} &= x_{2i} \sin(p \theta_i) + x_{2i+1} \cos(p \theta_i)
+\end{aligned} $$
+
+where $\theta_i = 10000^{-2i/d}$ for standard RoPE. With this formulation, the attention score between positions $p$ and $q$ depends only on their relative offset $(p - q)$, since:
+
+$$ \text{RoPE}(\mathbf{x}, p)^\top \text{RoPE}(\mathbf{y}, q) = \mathbf{x}^\top \mathbf{R}_{p-q} \mathbf{y} $$
+
+Qwen2.5 uses $\theta_i = 1000000^{-2i/d}$ (a larger base, extending the context to 32K tokens).
+
+**SigLIP/SigLIP2**: Learned 1D absolute position embeddings of shape $(N_{\text{patches}}, 768)$. These are added to the patch embeddings before the first transformer layer. SigLIP2 interpolates position embeddings from the checkpoint to match the model's expected grid size.
+
+**MoonViT — 2D RoPE**: Instead of 1D positions, RoPE is applied on a 2D grid with indices $(i, j)$ for each patch at grid position $(i, j)$. The rotation uses two separate frequencies for the height and width dimensions:
+
+$$ \begin{aligned}
+    \text{RoPE}_\text{2D}(\mathbf{x}, i, j) &= \text{RoPE}(\text{RoPE}(\mathbf{x}, i), j)
+\end{aligned} $$
+
+This decouples the $x$ and $y$ spatial dimensions, enabling the model to attend to spatial regions at any resolution without position embedding interpolation.
 
 ---
 
@@ -223,18 +268,38 @@ The vision encoder converts raw pixels into patch-level feature vectors. Three e
 
 ### 5.2 SigLIP Path
 
-Standard HuggingFace ViT. Image resized to 224×224, normalized to `[0,1]`, patched into 16×16 tokens, passed through 24 transformer layers. Output is `(196, 768)` patch features. Simple, reliable, works out of the box.
+Standard HuggingFace ViT. The input image $\mathbf{I} \in \mathbb{R}^{3 \times H \times W}$ is resized to $224 \times 224$ and normalized. It is then split into $N = HW / p^2$ non-overlapping patches of size $p \times p$ (here $p = 16$, so $N = 196$). Each patch is flattened and linearly projected:
+
+$$ \mathbf{x}_i = \mathbf{W}_{\text{embed}} \cdot \text{flatten}(\mathbf{I}[:, i]) + \mathbf{p}_i, \quad \mathbf{W}_{\text{embed}} \in \mathbb{R}^{768 \times (3 \cdot 16 \cdot 16)} $$
+
+where $\mathbf{p}_i$ is a learned position embedding. The resulting patch tokens $\mathbf{X} = [\mathbf{x}_1; \ldots; \mathbf{x}_N] \in \mathbb{R}^{N \times 768}$ pass through 24 transformer layers. Output is `(196, 768)` patch features. Simple, reliable, works out of the box.
 
 ### 5.3 SigLIP2 Path
 
-SigLIP2 changes the patch embedding from Conv2d to Linear. The model expects each patch to be pre-flattened — so the raw image `(3, 224, 224)` must be manually unrolled into `(196, 768)` before the Linear layer. The checkpoint stores Conv2d weights, requiring a reshape from `(768, 3, 16, 16)` → `(768, 768)` to load correctly.
+SigLIP2 changes the patch embedding from Conv2d to Linear. The model expects each patch to be pre-flattened — so the raw image `(3, 224, 224)` must be manually unrolled into `(196, 768)` before the Linear layer. The manual patchify operation is:
+
+$$ \mathbf{X}_{i,j} = \text{flatten}\left( \mathbf{I}[:, ip:(i+1)p, jp:(j+1)p] \right) \in \mathbb{R}^{3p^2} $$
+
+for each grid position $(i, j)$ where $p = 16$. The resulting tensor $\mathbf{X} \in \mathbb{R}^{(H/p)(W/p) \times 3p^2}$ is then passed through the Linear embedding:
+
+$$ \mathbf{z}_k = \mathbf{W}_{\text{embed}} \mathbf{x}_k, \quad \mathbf{W}_{\text{embed}} \in \mathbb{R}^{768 \times 768} $$
+
+Note the weight shape mismatch: the checkpoint stores Conv2d weights $\mathbf{W}_{\text{conv}} \in \mathbb{R}^{768 \times 3 \times 16 \times 16}$, requiring a reshape $\mathbf{W}_{\text{embed}} = \text{reshape}(\mathbf{W}_{\text{conv}}, 768, 768)$ to load correctly.
 
 ### 5.4 MoonViT Path
 
 A custom 27-layer ViT designed for high-resolution, multi-scale input:
 
-- **2D RoPE**: Rotary position embeddings are computed on a 2D grid `(H/14, W/14)` rather than a 1D sequence. This lets the model attend to spatial relationships at any resolution without position embedding interpolation.
-- **Patch Merge**: After the 27 encoder layers, a 2×2 convolution merges adjacent patches. Output has 1/4 the spatial size but 4× the channel width (4608 = 1152 × 4).
+- **2D RoPE**: Rotary position embeddings are computed on a 2D grid of size $(H/14, W/14)$ rather than a 1D sequence. For a patch at grid position $(i, j)$, the rotation is applied independently to the height and width axes:
+
+$$ \mathbf{x}_{i,j}' = \text{RoPE}_h(\text{RoPE}_w(\mathbf{x}, i), j) $$
+
+where each dimension has its own frequency set $\{\theta_k^{(h)}\}$ and $\{\theta_k^{(w)}\}$. This lets the model attend to spatial relationships at any resolution without position embedding interpolation.
+- **Patch Merge**: After the 27 encoder layers, adjacent patches are merged using a 2×2 convolution. If the encoder produces features $\mathbf{Z} \in \mathbb{R}^{(H/14) \times (W/14) \times 1152}$, the merge operation produces:
+
+$$ \mathbf{Z}'_{i,j} = \text{Conv2d}_{2\times2}(\mathbf{Z}_{2i:2i+2, 2j:2j+2}) \in \mathbb{R}^{4608} $$
+
+Output has $1/4$ the spatial size but $4\times$ the channel width (4608 = 1152 × 4). These merged tokens form the final visual features that are projected to the LLM's embedding space.
 - **Native Resolution**: Can process images at their original resolution (or tiles thereof), avoiding the information loss from aggressive downsampling.
 
 MoonViT is the only encoder that supports PBD, because the patch merge step produces tokens that naturally group into spatial regions — aligning with the block decoding pattern.
@@ -248,18 +313,30 @@ The projector (also called the connector or MLP bridge) maps vision features fro
 ### 6.1 Architecture
 
 **For SigLIP/SigLIP2 (768 → 896):**
-```
-Linear(768, 896) → GELU → Linear(896, 896)
-```
-- 2 layers, no bias, no normalization
-- ~1.4M parameters
+
+$$ \begin{aligned}
+    \mathbf{h} &= \mathbf{W}_1 \mathbf{x} + \mathbf{b}_1, \quad \mathbf{W}_1 \in \mathbb{R}^{896 \times 768} \\[2pt]
+    \mathbf{h} &= \text{GELU}(\mathbf{h}) \\[2pt]
+    \mathbf{z} &= \mathbf{W}_2 \mathbf{h} + \mathbf{b}_2, \quad \mathbf{W}_2 \in \mathbb{R}^{896 \times 896}
+\end{aligned} $$
+
+- 2 layers, no bias in practice ($\mathbf{b}_1 = \mathbf{b}_2 = 0$), no normalization
+- ~1.4M parameters ($768 \times 896 + 896 \times 896 = 1,376,256$)
 
 **For MoonViT (4608 → 896):**
-```
-LayerNorm(4608) → Linear(4608, 896) → GELU → Linear(896, 896)
-```
+
+$$ \begin{aligned}
+    \mathbf{h} &= \text{LayerNorm}(\mathbf{x}), \quad \mathbf{x} \in \mathbb{R}^{4608} \\[2pt]
+    \mathbf{h} &= \text{GELU}(\mathbf{W}_1 \mathbf{h}), \quad \mathbf{W}_1 \in \mathbb{R}^{896 \times 4608} \\[2pt]
+    \mathbf{z} &= \mathbf{W}_2 \mathbf{h}, \quad \mathbf{W}_2 \in \mathbb{R}^{896 \times 896}
+\end{aligned} $$
+
 - 2 layers with LayerNorm before first linear
-- ~4.2M parameters
+- ~4.2M parameters ($4608 \times 896 + 896 \times 896 = 4,931,584$)
+
+The GELU activation is defined as:
+
+$$ \text{GELU}(x) = x \cdot \Phi(x) = x \cdot \frac{1}{2}\left[1 + \text{erf}\left(\frac{x}{\sqrt{2}}\right)\right] $$
 
 ### 6.2 Purpose
 
@@ -289,32 +366,46 @@ The most distinctive architectural choice: **bounding boxes are expressed as voc
 
 ### 7.2 Coordinate Encoding (Data Preparation)
 
-Each box is encoded as 4 coordinate tokens, normalized to `[0, 1000]`:
+Each bounding box is defined by its top-left and bottom-right corners in pixel coordinates:
 
-```
-x1_token = round(x1_pixel * 1000 / img_width)
-y1_token = round(y1_pixel * 1000 / img_height)
-x2_token = round(x2_pixel * 1000 / img_width)
-y2_token = round(y2_pixel * 1000 / img_height)
-```
+$$ \mathbf{b} = (x_1, y_1, x_2, y_2) \quad \text{where } 0 \leq x_1 < x_2 \leq W,\; 0 \leq y_1 < y_2 \leq H $$
 
-This produces integer tokens in `[0, 1000]`, which are then mapped to vocabulary IDs `151670 + token_value`.
+These continuous pixel values are quantized into 1001 integer bins $[0, 1000]$ using the image dimensions $(W, H)$:
+
+$$ \begin{aligned}
+    d_1 &= \left\lfloor \frac{x_1 \cdot 1000}{W} \right\rceil \\[2pt]
+    d_2 &= \left\lfloor \frac{y_1 \cdot 1000}{H} \right\rceil \\[2pt]
+    d_3 &= \left\lfloor \frac{x_2 \cdot 1000}{W} \right\rceil \\[2pt]
+    d_4 &= \left\lfloor \frac{y_2 \cdot 1000}{H} \right\rceil
+\end{aligned} $$
+
+where $\lfloor \cdot \rceil$ denotes rounding to the nearest integer. The resulting integers are clamped to $[0, 1000]$ and mapped to vocabulary token IDs:
+
+$$ \text{token\_id}(d_i) = \text{coord\_start} + d_i = 151670 + d_i $$
 
 Example serialization:
 ```
 <ref>cat</ref><box><432><219><687><544></box>
 ```
 
+**Coordinate quantization error**. The maximum spatial quantization error at input resolution $R$ is:
+
+$$ \Delta = \frac{R}{1000} $$
+
+For $R = 224$, $\Delta \approx 0.224$ pixels — sub-pixel precision, negligible for detection tasks where IoU-based evaluation tolerates such errors. For MoonViT processing at native 448×448, $\Delta \approx 0.448$ pixels.
+
 ### 7.3 Coordinate Decoding (Inference)
 
-The reverse operation during inference:
+The reverse operation recovers pixel-space coordinates from token-space bins:
 
-```
-x1_pixel = x1_token * img_width / 1000
-y1_pixel = y1_token * img_height / 1000
-```
+$$ \begin{aligned}
+    x_1 &= \frac{d_1 \cdot W}{1000} \\[2pt]
+    y_1 &= \frac{d_2 \cdot H}{1000} \\[2pt]
+    x_2 &= \frac{d_3 \cdot W}{1000} \\[2pt]
+    y_2 &= \frac{d_4 \cdot H}{1000}
+\end{aligned} $$
 
-This is done per-image using each image's actual dimensions, so the model works correctly regardless of input resolution.
+This denormalization is performed per-image using each image's actual dimensions $(W, H)$, so the model correctly handles images of any resolution despite always predicting in the fixed $[0, 1000]$ token space.
 
 ### 7.4 Why 1000 Bins?
 
@@ -334,7 +425,14 @@ A compact yet capable LLM from the Qwen family:
 - **12 transformer layers** with 896 hidden dimension
 - **Grouped Query Attention**: 14 query heads, 2 key/value heads (reduced KV cache)
 - **32,768 token context window** with RoPE (θ=1,000,000)
-- **SwiGLU activation** in the feed-forward network (intermediate size = 4864)
+- **SwiGLU activation** in the feed-forward network (intermediate size = 4864):
+
+$$ \text{SwiGLU}(\mathbf{x}) = \text{Swish}(\mathbf{W}_1 \mathbf{x}) \odot (\mathbf{W}_2 \mathbf{x}), \quad \text{Swish}(x) = x \cdot \sigma(x) $$
+
+The full FFN is:
+$$ \text{FFN}(\mathbf{x}) = \mathbf{W}_O \left( \text{Swish}(\mathbf{W}_G \mathbf{x}) \odot \mathbf{W}_U \mathbf{x} \right) $$
+
+where $\mathbf{W}_G, \mathbf{W}_U \in \mathbb{R}^{4864 \times 896}$ are the gate and up projections, $\mathbf{W}_O \in \mathbb{R}^{896 \times 4864}$ is the down projection, and $\odot$ is element-wise multiplication.
 - **~494M parameters**
 
 The Instruct variant is used because it's trained to follow instructions and produce structured outputs — important for generating formatted box sequences.
@@ -353,7 +451,11 @@ The LLM sees the full sequence as one continuous stream — it doesn't distingui
 
 ### 8.3 LM Head
 
-The language modeling head is an **untied linear layer**: `Linear(896, 152673)`. "Untied" means it has its own weight matrix, independent from the input embedding matrix. This is important because:
+The language modeling head is an **untied linear layer**: $\text{LMHead}(\mathbf{h}) = \mathbf{W}_{\text{lm}} \mathbf{h}$ where $\mathbf{W}_{\text{lm}} \in \mathbb{R}^{152673 \times 896}$. "Untied" means $\mathbf{W}_{\text{lm}}$ is a separate weight matrix, independent from the input embedding matrix $\mathbf{E} \in \mathbb{R}^{152673 \times 896}$. The logits for position $t$ are:
+
+$$ \mathbf{z}_t = \mathbf{W}_{\text{lm}} \mathbf{h}_t $$
+
+and the predicted token is $\hat{y}_t = \arg\max \mathbf{z}_t$. In the tied case ($\mathbf{W}_{\text{lm}} = \mathbf{E}^\top$), the LM head shares weights with the embedding layer, but this is undesirable here because:
 
 - Adding 1001 coordinate tokens would require the embedding matrix to learn token representations for them
 - The LM head needs to produce logits for these new tokens at output positions during generation
@@ -412,7 +514,16 @@ This is possible because of two techniques:
 
 **1. MTP Attention Mask**
 
-The attention mask for the 6 prediction tokens is **non-causal within the block**:
+Let the total sequence length be $T = C + B$, where $C$ is the context length (user prompt + image features) and $B = 6$ is the block size. Define the attention mask $\mathbf{M} \in \mathbb{R}^{T \times T}$ as:
+
+$$ \mathbf{M}_{i,j} = \begin{cases}
+0, & \text{if } j \leq i \text{ and } i < C \quad \text{(causal within context)} \\[2pt]
+0, & \text{if } j < C \text{ and } i \geq C \quad \text{(block → all context)} \\[2pt]
+0, & \text{if } j \geq C \text{ and } i \geq C \quad \text{(non-causal within block)} \\[2pt]
+-\infty, & \text{otherwise}
+\end{cases} $$
+
+In attention matrix form:
 
 ```
             ctx_1  ctx_2  ...  ctx_N  pred_1  pred_2  ...  pred_6
@@ -426,22 +537,37 @@ pred_2       ✓     ✓            ✓      ✓       ✓            ✓
 pred_6       ✓     ✓            ✓      ✓       ✓            ✓
 ```
 
-- Context tokens use standard causal masking
-- Prediction tokens see ALL context tokens (full visibility)
-- Prediction tokens see ALL other prediction tokens (non-causal)
+- Context tokens ($i < C$) use standard causal masking: each attends only to itself and previous context tokens
+- Prediction tokens ($i \geq C$) see ALL context tokens (full visibility into the prompt)
+- Prediction tokens see ALL other prediction tokens (non-causal within the block)
 - Each prediction token can condition on the others, enabling coordinated box prediction
+
+The attention scores are computed as:
+
+$$ \text{Attn}(\mathbf{Q}, \mathbf{K}, \mathbf{V}) = \text{softmax}\left( \frac{\mathbf{Q} \mathbf{K}^\top}{\sqrt{d_k}} + \mathbf{M} \right) \mathbf{V} $$
+
+where $d_k$ is the head dimension and $-\infty$ entries in $\mathbf{M}$ cause the softmax to output zero attention weight.
 
 **2. Weighted Coordinate Averaging**
 
-Instead of taking the argmax for each coordinate position, `decode_bbox_avg()` uses a **weighted average** of the top-k logits:
+Instead of taking the argmax for each coordinate position, `decode_bbox_avg()` uses a **weighted average** of the top-$k$ logits. Let $\ell_1, \ldots, \ell_{1001}$ be the logits for the 1001 coordinate tokens at a given position. The top-$k$ candidate values and their logits are:
 
-```
-For each of the 4 coordinate positions:
-  1. Take top-4 logits within [coord_start, coord_end]
-  2. Compute softmax over those 4 logits
-  3. avg_coord = sum(softmax_score_i * coord_value_i) / sum(scores)
-  4. Round to nearest integer in [0, 1000]
-```
+$$ \mathcal{C}_k = \left\{ (v_j, \ell_j) \mid \ell_j \in \text{top-}k(\ell_1, \ldots, \ell_{1001}) \right\} $$
+
+A softmax is applied over the selected logits:
+
+$$ p_j = \frac{\exp(\ell_j / \tau)}{\sum_{m=1}^{k} \exp(\ell_m / \tau)} $$
+
+where $\tau$ is the temperature (default $\tau = 1.0$, greedy when $\tau \to 0$). The weighted average coordinate value is:
+
+$$ \hat{v} = \left\lfloor \frac{ \sum_{j=1}^{k} p_j \cdot v_j }{ \sum_{j=1}^{k} p_j } \right\rceil $$
+
+In **fast** mode this average is always used. In **hybrid** mode, the block is flagged as `error_box` if the top-1 probability is low and the candidate spread is wide:
+
+$$ \text{flag}\ = \begin{cases}
+\text{error\_box}, & \text{if } p_{\max} < 0.9 \ \wedge\ \text{spread} > 60 \\
+\text{coord\_box}, & \text{otherwise}
+\end{cases} $$
 
 This produces smoother, more accurate coordinates than naive argmax — compensating for the fact that the model has less information per coordinate (since it hasn't seen the previous coordinate's actual value).
 
@@ -489,7 +615,19 @@ After each MTP block, the 6 decoded tokens are classified:
 
 ### 10.1 Loss Function
 
-Standard **cross-entropy** on the LM head's output logits. Key detail: loss is **masked** — only computed on the assistant (GPT) response portion of the sequence:
+The training objective is the **masked cross-entropy loss** over the vocabulary. Let $\mathbf{h}_t \in \mathbb{R}^{896}$ be the LLM's hidden state at position $t$, and $\mathbf{W}_{\text{lm}} \in \mathbb{R}^{152673 \times 896}$ be the LM head weight matrix. The logits for position $t$ are:
+
+$$ \mathbf{z}_t = \mathbf{W}_{\text{lm}} \mathbf{h}_t \in \mathbb{R}^{152673} $$
+
+The predicted probability of token $v$ at position $t$ is:
+
+$$ p_t(v) = \frac{\exp(z_{t,v})}{\sum_{j=1}^{152673} \exp(z_{t,j})} $$
+
+Let $y_t \in \{0, \ldots, 152672\}$ be the ground-truth token ID at position $t$, and let $\mathcal{M} = \{t \mid y_t \neq -100\}$ be the set of non-masked positions. The loss is:
+
+$$ \mathcal{L} = -\frac{1}{|\mathcal{M}|} \sum_{t \in \mathcal{M}} \log p_t(y_t) $$
+
+Key detail: loss is **masked** — only computed on the assistant (GPT) response portion of the sequence:
 
 ```
 Text:   <|im_start|>user\n<|image|>\nFind the cat.<|im_end|>\n<|im_start|>assistant\n<ref>cat</ref><box><432><219><687><544></box><|im_end|>
@@ -526,7 +664,21 @@ Training data uses the ShareGPT format:
 
 ### 10.4 Augmentation
 
-A random long-edge resize strategy: with 50% probability, the image's longer edge is resized to a random value in `[640, 2560]` (preserving aspect ratio), then finally resized to the model's input size (224×224). This provides scale diversity without distorting aspect ratios.
+A random long-edge resize strategy. Given an image of dimensions $(W, H)$, let $L = \max(W, H)$. With 50% probability, a target long-edge length $L'$ is sampled uniformly:
+
+$$ L' \sim \mathcal{U}[640, 2560] $$
+
+The image is resized preserving aspect ratio:
+
+$$ s = \frac{L'}{L}, \quad (W', H') = (sW, sH) $$
+
+Then all images are resized to the model's input size $(R, R)$ (e.g., 224×224) using Lanczos interpolation. This provides scale diversity without distorting aspect ratios.
+
+Finally, pixel values are normalized for the vision encoder:
+
+$$ \mathbf{x}_{\text{norm}} = \frac{\mathbf{x}_{\text{tensor}} - \mu}{\sigma}, \quad \mu = \sigma = 0.5 $$
+
+mapping $[0, 1]$ to $[-1, 1]$.
 
 ### 10.5 What Freezes vs What Trains
 
@@ -562,15 +714,42 @@ TRAINABLE (~37M params total):
 
 ### 11.2 Evaluation Metrics
 
-Standard COCO detection metrics:
+**Intersection-over-Union (IoU)**. For a predicted box $\mathbf{b}_p$ and ground-truth box $\mathbf{b}_g$ defined by their corners $(x_1, y_1, x_2, y_2)$:
+
+$$ \begin{aligned}
+    \mathbf{b}_p \cap \mathbf{b}_g &= \max(0, \min(x_{p,2}, x_{g,2}) - \max(x_{p,1}, x_{g,1})) \\[2pt]
+    &\quad \times \max(0, \min(y_{p,2}, y_{g,2}) - \max(y_{p,1}, y_{g,1})) \\[2pt]
+    \mathbf{b}_p \cup \mathbf{b}_g &= A_p + A_g - (\mathbf{b}_p \cap \mathbf{b}_g) \\[2pt]
+    \text{IoU}(\mathbf{b}_p, \mathbf{b}_g) &= \frac{ \mathbf{b}_p \cap \mathbf{b}_g }{ \mathbf{b}_p \cup \mathbf{b}_g }
+\end{aligned} $$
+
+where $A_p$ and $A_g$ are the areas of the predicted and ground-truth boxes.
+
+**Average Precision (AP)**. A detection is considered a true positive if $\text{IoU} \geq \tau$ for some threshold $\tau$. Predictions are ranked by confidence score, and precision-recall curve is computed. AP at threshold $\tau$ is the 11-point interpolated average precision:
+
+$$ \text{AP}_\tau = \frac{1}{11} \sum_{r \in \mathcal{R}} \max_{\tilde{r} \geq r} p(\tilde{r}) $$
+
+where $\mathcal{R} = \{0.0, 0.1, \ldots, 1.0\}$ are 11 equally-spaced recall levels and $p(r)$ is the precision at recall $r$.
+
+**Mean AP (COCO standard)**:
+
+$$ \text{mAP} = \frac{1}{10} \sum_{\tau \in \mathcal{T}} \text{AP}_\tau, \quad \mathcal{T} = \{0.50, 0.55, \ldots, 0.95\} $$
+
+**Precision, Recall, F1** at a given IoU threshold $\tau$:
+
+$$ \begin{aligned}
+    \text{Precision}_\tau &= \frac{\text{TP}_\tau}{\text{TP}_\tau + \text{FP}_\tau} \\[2pt]
+    \text{Recall}_\tau &= \frac{\text{TP}_\tau}{\text{TP}_\tau + \text{FN}_\tau} \\[2pt]
+    \text{F1}_\tau &= 2 \cdot \frac{\text{Precision}_\tau \cdot \text{Recall}_\tau}{\text{Precision}_\tau + \text{Recall}_\tau}
+\end{aligned} $$
 
 | Metric | What it measures |
 |---|---|
-| **AP** (mean) | Average Precision across IoU thresholds 0.50:0.05:0.95 |
+| **mAP** | Mean AP across IoU thresholds 0.50:0.05:0.95 |
 | **AP@0.50** | PASCAL VOC standard (50% IoU) |
 | **AP@0.75** | Strict localization (75% IoU) |
-| **mIoU** | Mean Intersection-over-Union |
-| **Precision / Recall / F1** | At each IoU threshold |
+| **mIoU** | Mean pairwise IoU |
+| **Precision / Recall / F1** | Per-threshold classification metrics |
 
 ### 11.3 Visualization
 
