@@ -77,9 +77,11 @@ def main():
 
     print(f"\nGenerated text: {result['text']}")
     print(f"Detected {len(result['boxes'])} boxes:")
+    confs = result.get('confidences', [])
     for i, box in enumerate(result["boxes"]):
         x1, y1, x2, y2 = box
-        print(f"  [{i}] ({x1:.0f}, {y1:.0f}) -> ({x2:.0f}, {y2:.0f})")
+        conf = confs[i] if i < len(confs) else 0.0
+        print(f"  [{i}] ({x1:.0f}, {y1:.0f}) -> ({x2:.0f}, {y2:.0f})  conf={conf:.3f}")
 
     if args.output or not args.output:
         output_path = args.output or f"output_{os.path.splitext(os.path.basename(args.image))[0]}.png"

@@ -57,9 +57,14 @@ class DetectionInferenceEngine:
         max_new = max_new_tokens or self.config.max_new_tokens
 
         generation_mode = self.config.mode
+        token_ids_config = get_token_ids_from_config(self.model.model_config)
+        box_start_id = token_ids_config['box_start_token_id']
+        box_end_id = token_ids_config['box_end_token_id']
+        coord_start_id = token_ids_config['coord_start_token_id']
+        coord_end_id = token_ids_config['coord_end_token_id']
+
         if generation_mode != 'slow':
-            # Use PBD generation
-            generated_ids = self.model.generate_pbd(
+            generated_ids, confs = self.model.generate_pbd(
                 pixel_values=pixel_values, input_ids=input_ids,
                 attention_mask=attention_mask, tokenizer=self.tokenizer,
                 generation_mode=generation_mode, max_new_tokens=max_new,
@@ -84,7 +89,34 @@ class DetectionInferenceEngine:
             text_output = self.tokenizer.decode(full_ids[0], skip_special_tokens=False)
 
         boxes = self._parse_boxes(text_output, orig_w, orig_h)
-        return {"text": text_output, "boxes": boxes}
+
+        # Extract per-box confidences from generated token IDs
+        if generation_mode != 'slow' and confs:
+            box_confs = self._extract_box_confidences(
+                generated_ids[0], confs, box_start_id, box_end_id,
+                coord_start_id, coord_end_id,
+            )
+        else:
+            box_confs = [0.0] * len(boxes)
+
+        return {"text": text_output, "boxes": boxes, "confidences": box_confs}
+
+    def _extract_box_confidences(self, token_ids, confs, box_start_id, box_end_id,
+                                  coord_start_id, coord_end_id):
+        """Walk generated token IDs to find boxes and compute per-box confidence."""
+        box_confs = []
+        i = 0
+        n = len(token_ids)
+        coord_range = range(coord_start_id, coord_end_id + 1)
+        while i < n:
+            if token_ids[i] == box_start_id and i + 5 < n:
+                if all(token_ids[i + j + 1] in coord_range for j in range(4)) and token_ids[i + 5] == box_end_id:
+                    coord_confs = [confs[i + j + 1] for j in range(4)]
+                    box_confs.append(sum(coord_confs) / len(coord_confs))
+                    i += 6
+                    continue
+            i += 1
+        return box_confs
 
     def _preprocess_moonvit(self, image: Image.Image, ve) -> Tuple[torch.Tensor, torch.Tensor]:
         from .modeling_vit import MoonVitPretrainedModel

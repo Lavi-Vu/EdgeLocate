@@ -551,7 +551,8 @@ class LocateAnythingForDetection(PreTrainedModel):
     def generate_pbd(self, pixel_values=None, input_ids=None, attention_mask=None,
                       tokenizer=None, generation_mode='hybrid', max_new_tokens=512,
                       temperature=0.0, top_p=1.0, block_size=6, keep_k_avg=4, verbose=False):
-        """Parallel Box Decoding (PBD) generation with MTP. Works with any VE (SigLIP, SigLIP2, MoonViT)."""
+        """Parallel Box Decoding (PBD) generation with MTP. Works with any VE (SigLIP, SigLIP2, MoonViT).
+        Returns (token_ids, confidences) where confidences is a list of per-token softmax probabilities."""
         device = input_ids.device
         batch_size, seq_len = input_ids.shape
         assert batch_size == 1, "PBD only supports batch_size=1"
@@ -573,8 +574,10 @@ class LocateAnythingForDetection(PreTrainedModel):
             context_len = seq_len
 
         generated = input_ids.clone()
+        all_confs = []
         use_mtp = generation_mode in ('fast', 'hybrid')
         tok_ids = self.token_ids or get_token_ids_from_config(self.model_config)
+        coord_start_token_id = tok_ids['coord_start_token_id']
         im_end_token_id = tok_ids['im_end_token_id']
         box_end_token_id = tok_ids['box_end_token_id']
 
@@ -602,7 +605,7 @@ class LocateAnythingForDetection(PreTrainedModel):
                     )
 
                 next_logits = outputs.logits[:, -block_size:, :]
-                _, _, x0, box_avg = sample_tokens(
+                probs, _, x0, box_avg = sample_tokens(
                     next_logits, generated, tok_ids,
                     temperature=temperature, top_p=top_p,
                     keep_k_avg=keep_k_avg, generation_mode=generation_mode,
@@ -610,6 +613,15 @@ class LocateAnythingForDetection(PreTrainedModel):
                 is_box_empty = (box_avg[0] == 0).all()
                 new_tokens = x0[0] if is_box_empty else box_avg[0]
                 out = handle_pattern(new_tokens, tok_ids, generation_mode)
+
+                # Track per-token confidences
+                for i, t in enumerate(new_tokens):
+                    t_id = t.item()
+                    if is_box_empty or not (coord_start_token_id <= t_id <= coord_start_token_id + 1000):
+                        p = probs[0, i, t_id].item()
+                    else:
+                        p = probs[0, i, t_id].item()
+                    all_confs.append(p)
 
                 if out['type'] == 'im_end':
                     break
@@ -635,12 +647,13 @@ class LocateAnythingForDetection(PreTrainedModel):
                     )
 
                 next_logits = outputs.logits[:, -1:, :]
-                _, _, x0, _ = sample_tokens(
+                probs, _, x0, _ = sample_tokens(
                     next_logits, generated, tok_ids,
                     temperature=temperature, top_p=top_p,
                 )
                 next_token = x0[0]
                 next_id = next_token[0].item()
+                all_confs.append(probs[0, 0, next_id].item())
 
                 if next_id == im_end_token_id:
                     generated = torch.cat([generated, next_token.unsqueeze(0)], dim=1)
@@ -655,7 +668,7 @@ class LocateAnythingForDetection(PreTrainedModel):
                 if generation_mode == 'hybrid' and next_id == box_end_token_id:
                     use_mtp = True
 
-        return generated[:, seq_len:]
+        return generated[:, seq_len:], all_confs
 
     def get_input_embeddings(self):
         return self.llm.get_input_embeddings()
