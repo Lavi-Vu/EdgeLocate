@@ -1,8 +1,14 @@
 # EdgeLocate Architecture
 
-EdgeLocate is a vision-language detection model (<1B params) ported from NVIDIA's [LocateAnything (EagleVL)](https://github.com/NVIDIA/LocateAnything). It predicts bounding boxes as discrete coordinate tokens via standard cross-entropy loss through an LM head, using a vision encoder → MLP projector → Qwen2.5 LLM + LoRA pipeline.
+EdgeLocate is a <1B vision-language detection model ported from NVIDIA's [LocateAnything (EagleVL)](https://github.com/NVIDIA/LocateAnything). It predicts bounding boxes as **discrete coordinate tokens** (`<0>`–`<1000>`) via cross-entropy loss through the LM head — no regression head, no object queries. The pipeline is: vision encoder → MLP projector → Qwen2.5 LLM + LoRA → LM head.
 
-## Model Architecture
+| Total params | Trainable params | VE | LLM | VRAM (train) |
+|---|---|---|---|---|
+| ~589M (SigLIP) / ~904M (MoonViT) | ~37–44M | Frozen (or LoRA) | LoRA r=128 | ~4–8 GB |
+
+---
+
+## 1. System Architecture
 
 ```mermaid
 flowchart LR
@@ -16,180 +22,375 @@ flowchart LR
         VE_SEL -->|"siglip"| SIGLIP["SigLIP<br/>patch → (N, 768)"]
         VE_SEL -->|"siglip2"| SIGLIP2["SigLIP2<br/>patch embed: Linear<br/>manual patchify"]
         VE_SEL -->|"moonvit"| MOON["MoonViT<br/>27 layers, 2D RoPE<br/>patch merge → (N, 4×1152)"]
-        SIGLIP --> OUT[("vis features")]
-        SIGLIP2 --> OUT
-        MOON --> OUT
+        SIGLIP --> FEAT[("vis features<br/>(B, N, D_ve)")]
+        SIGLIP2 --> FEAT
+        MOON --> FEAT
     end
 
     subgraph Proj["Projector"]
-        OUT --> P_SEL{"VE dim?"}
+        FEAT --> P_SEL{"VE dim?"}
         P_SEL -->|768| MLP2["MLPProjector<br/>Linear(768,896)→GELU→Linear(896,896)"]
         P_SEL -->|"4×1152"| MLP3["MoonViTProjector<br/>Linear(4608,896)→LN→GELU→Dropout→Linear(896,896)"]
     end
 
     subgraph TextEmbed["Text Embedding"]
-        TXT --> TOK["Tokenizer<br/>(+ special tokens)"]
+        TXT --> TOK["Tokenizer<br/>(+ &lt;|image|&gt; &lt;box&gt; &lt;0&gt;–&lt;1000&gt;)"]
         TOK --> EMB["Embedding<br/>vocab → 896"]
     end
 
     subgraph LLM["Language Model"]
-        MERGE["merge: projected vis feats<br/>replace &lt;|image|&gt; embeddings"]
+        MERGE["replace &lt;|image|&gt;<br/>with projected vis feats"]
         EMB --> MERGE
         MLP2 --> MERGE
         MLP3 --> MERGE
-        MERGE --> QWEN["Qwen2.5-0.5B  + LoRA<br/>12 layers, 896 dim"]
+        MERGE --> QWEN["Qwen2.5-0.5B + LoRA<br/>12 layers, 896 dim<br/>causal attention"]
     end
 
-    subgraph Head["Output"]
-        QWEN --> LMH["LM Head<br/>(untied, 896 → vocab)"]
-        LMH --> LOGITS[("logits<br/>(B, seq, vocab)")]
+    subgraph Head["LM Head"]
+        QWEN --> LMH["Linear(896, 152673)<br/>(untied)"]
+        LMH --> LOGITS[("logits<br/>(B, seq, 152673)")]
+    end
+
+    subgraph Decode["Token Decoding"]
+        LOGITS --> GEN{"generation<br/>mode?"}
+        GEN -->|"slow"| AR["model.generate()<br/>autoregressive<br/>1 token at a time"]
+        GEN -->|"fast/hybrid"| PBD["generate_pbd()"]
+        PBD --> MTP["MTP mask: block_size=6<br/>non-causal within block<br/>→ sample_tokens()"]
+        MTP --> AVG["decode_bbox_avg()<br/>weighted avg of top-k<br/>coord logits"]
+        AVG --> PAT["handle_pattern()<br/>coord_box / error_box<br/>→ continue or fallback"]
+        PAT --> AR
+    end
+
+    subgraph BoxOut["Box Output"]
+        AR --> TOKENS[("token IDs<br/>&lt;ref&gt;cat&lt;/ref&gt;&lt;box&gt;&lt;d1&gt;…&lt;d4&gt;&lt;/box&gt;")]
+        TOKENS --> PARSE["parse_boxes_from_text()<br/>regex extraction"]
+        PARSE --> DENORM["denormalize<br/>coord × img_dim / 1000"]
+        DENORM --> PIXEL[("pixel boxes<br/>(x1,y1,x2,y2)")]
     end
 
     IMG --> PRE
 ```
 
-    style Input fill:#e1f5fe
-    style VE fill:#f3e5f5
-    style Proj fill:#fff3e0
-    style TextEmbed fill:#e8f5e9
-    style LLM fill:#ffebee
-    style Head fill:#fce4ec
+---
+
+## 2. Discrete Coordinate Tokens
+
+The core design choice: bounding box coordinates are **vocabulary tokens**, not regression targets.
+
+### Why discrete tokens
+- Cross-entropy loss provides strong per-class supervision through every layer (LM head → LLM → projector → VE)
+- Gradients flow to all components, unlike MSE on a separate regression head where gradients are shallow
+- Naturally handles multi-label, multi-box outputs through autoregressive generation
+
+### Coordinate encoding (pixel → token)
+
+During data preparation, COCO pixel coordinates `(x1, y1, x2, y2)` are quantized to `[0, 1000]` integer bins:
+
+```
+x1_token = int(x1_pixel * 1000 / img_width)
+y1_token = int(y1_pixel * 1000 / img_height)
+x2_token = int(x2_pixel * 1000 / img_width)
+y2_token = int(y2_pixel * 1000 / img_height)
 ```
 
-## Files
+These become vocabulary tokens `<d1>`, `<d2>`, `<d3>`, `<d4>` (IDs 151670–152670), serialized as:
 
-| File | Role |
-|---|---|
-| `model.py` | `LocateAnythingForDetection` — dual VE dispatch, projector, `generate_pbd()`, packed forward |
-| `modeling_vit.py` | `MoonViTModel` — 27-layer ViT, 2D RoPE, patch merge (2×2 kernel, 4× channel) |
-| `generate_utils.py` | PBD sampling: `sample_tokens()`, `decode_bbox_avg()`, `handle_pattern()`, MTP mask |
-| `config.py` | `ModelConfig`, `TrainingConfig`, `DataConfig`, `InferenceConfig`, CLI parser |
-| `utils.py` | Token IDs, `setup_tokenizer()`, `parse_boxes_from_text()`, `load_image()` |
-| `dataset.py` | `DetectionDataset` (single + recipe), `PackedDetectionDataset`, `_SubDataset` |
-| `training.py` | `setup_training()` (HF Trainer), `DetectionDataCollator`, `TrainVisCallback` (epoch vis) |
-| `inference.py` | `DetectionInferenceEngine.predict()` (single) and `predict_batch()`, `visualize_prediction()` |
-| `eval.py` | `run_benchmark()`, `compute_coco_ap()`, COCO metrics pipeline |
+```
+<ref>cat</ref><box><d1><d2><d3><d4></box>
+```
 
-## Vision Encoder
+### Coordinate decoding (token → pixel)
+
+During inference and evaluation, the reverse:
+
+```
+x1_pixel = int(x1_token * img_width / 1000)
+y1_pixel = int(y1_token * img_height / 1000)
+```
+
+Both GT and predictions are denormalized to original image pixel space before metric computation.
+
+### Token scheme
+
+| Token | ID | Usage |
+|---|---|---|
+| `<\|image\|>` | 151665 | Image anchor — replaced by visual features at merge |
+| `<box>` | 151666 | Marks start of box coordinate sequence |
+| `</box>` | 151667 | Marks end of box coordinate sequence |
+| `<ref>` | 151668 | Start of object label/name |
+| `</ref>` | 151669 | End of object label/name |
+| `<0>`–`<1000>` | 151670–152670 | 1001 quantized coordinate bins (4 per box) |
+| `<null>` | 152671 | Special token: no detection (reserved) |
+| `<text_mask>` | 152672 | MTP mask placeholder for PBD block decoding |
+
+Vocabulary size: 152673 (base Qwen2.5 + 1001 coord + 8 special).
+
+---
+
+## 3. Vision Encoder
+
+Three encoder paths are supported, auto-detected at model load:
+
+| Encoder | Resolution | Output Dim | Preprocessing | PBD Support |
+|---|---|---|---|---|
+| SigLIP | 224×224 | 768 | Resize + normalize | No |
+| SigLIP2 | 224×224 (or naflex) | 768 | Resize + normalize, manual patchify | No |
+| MoonViT | Native | 1152 (×4 after merge) | Tile-align, patchify | Yes |
 
 ### SigLIP (`VisionEncoderWrapper`)
-- Standard HuggingFace ViT models (SigLIP, SigLIP2, MobileCLIP)
-- Returns `(B, N_patches, D)` features at fixed resolution
-- Frozen by default
+Standard HuggingFace ViT model (`google/siglip-base-patch16-224`). Image is resized to 224×224, normalized `mean=0.5, std=0.5`, passed through the encoder. Returns `(B, 196, 768)` patch features. Frozen by default.
+
+### SigLIP2
+Similar to SigLIP but with special handling in transformers 5.12.1:
+- `Siglip2VisionEmbeddings.__init__` creates `nn.Linear(768, 768)` as patch_embedding instead of `nn.Conv2d(768, 3, 16, 16)`
+- `forward()` passes raw `(B, 3, H, W)` pixels → must manually patchify upstream into `(B, N, 768)` before the Linear layer
+- HF `from_pretrained` returns dual `Siglip2Model` (vision+text) → must unwrap via `.vision_model` (checked via `hasattr(encoder, 'text_model')`)
+- `SiglipConfig` nests `vision_config` → all `hidden_size`/`patch_size` lookups check `hasattr(cfg, 'vision_config')` first
 
 ### MoonViT (`MoonViTModel`)
-- 27-layer ViT, 1152 hidden dim, native-resolution support
-- **2D RoPE**: Rotary position embeddings in 2D grid space
-- **Patch merge**: 2×2 kernel after encoder produces `(H/14/2)×(W/14/2)` tokens with 4× channel width
-- Auto-detected via `config.model_type == "moonvit"` or name containing "moonvit"
-- Required for PBD generation
+27-layer ViT with 1152 hidden dim. Designed for native-resolution input:
+- **2D RoPE**: Rotary position embeddings applied in 2D grid space (not 1D sequence), enabling variable-resolution generalization
+- **Patch merge**: After the encoder, a 2×2 kernel merges adjacent patches → output `(H/14/2)×(W/14/2)` tokens with 4× channel width (4608 dim)
+- **Auto-detection**: Triggered by `config.model_type == "moonvit"` or model name containing "moonvit"
+- **Required** for PBD generation (the `generate_pbd()` method only dispatches when `is_moonvit=True`)
 
-### VE Auto-detection
-1. Check `raw.model_type == "moonvit"` → MoonViT path
-2. Check model name for "siglip2" → SigLIP2 (adds `pixel_attention_mask`, `spatial_shapes`)
-3. Else → standard SigLIP path
+---
 
-### SigLIP2 Special Handling
-- `Siglip2VisionEmbeddings.__init__` creates `nn.Linear(768, 768)` as patch_embedding (not `nn.Conv2d`)
-- `forward()` passes raw `(B, 3, H, W)` pixels → must manually patchify upstream
-- HF `from_pretrained` returns dual `Siglip2Model` (vision+text) → unwrap via `.vision_model`
-- `SiglipConfig` nests `vision_config` → all `hidden_size`/`patch_size` lookups check `hasattr(cfg, 'vision_config')`
+## 4. Projector
 
-## Projector
+Maps vision encoder output to the LLM's 896-dim embedding space.
 
-### MLPProjector (SigLIP/MoonViT)
-- 2-layer MLP: `Linear(hidden_size, 896)` → GELU → `Linear(896, 896)`, no bias
-- Input cast to projector dtype at runtime (avoids `DataParallel` dtype mismatches)
+### MLPProjector (SigLIP/SigLIP2)
+```
+Linear(768 → 896) → GELU → Linear(896 → 896)
+```
+No bias, no normalization. Input cast to projector dtype at runtime to avoid `DataParallel` dtype mismatches.
 
 ### MoonViTProjector
-- 3-layer MLP with LayerNorm and Dropout
-- Input: `hidden_size * 4` (post-merge MoonViT channels)
+```
+Linear(4608 → 896) → LayerNorm → GELU → Dropout → Linear(896 → 896)
+```
+3-layer with LayerNorm and dropout. The 4608 input comes from MoonViT's 4× channel expansion after patch merge.
 
-## Token Scheme
+---
 
-| Token | ID | Description |
+## 5. Language Model
+
+Base: `Qwen/Qwen2.5-0.5B-Instruct` (12 layers, 896 hidden dim, 0.5B params).
+
+### LoRA
+Applied to all attention projection matrices (`q_proj`, `k_proj`, `v_proj`, `o_proj`) with rank `r=128`, alpha=256. Only LoRA weights + projector + LM head are trainable (~37M params). The base LLM and VE stay frozen.
+
+### Visual feature merge
+The `<|image|>` token (ID 151665) in the user prompt's embedding sequence is **replaced** by the projected visual features. The LLM sees a sequence like:
+
+```
+[text embeddings ... projected_vis_feats ... text embeddings]
+```
+
+where `projected_vis_feats` occupies the position(s) of `<|image|>`.
+
+### LM Head
+Untied (`tie_word_embeddings=False`). Projects 896-dim LLM output → vocabulary logits (152673 classes). The coordinate token logits at positions corresponding to `<d1>`–`<d4>` in the assistant response are trained via cross-entropy against the ground-truth coordinate tokens.
+
+---
+
+## 6. Parallel Box Decoding (PBD)
+
+PBD accelerates inference by predicting multiple tokens at once instead of one-by-one. It uses **Multi-Token Prediction (MTP)** — a non-causal attention mask within a block of `block_size` tokens, allowing them to be decoded in parallel.
+
+### MTP Attention Mask
+
+```python
+def create_mtp_attention_mask(context_len, block_size, device, dtype):
+    # Shape: (1, 1, total_len, total_len) where total_len = context_len + block_size
+    for i in range(total_len):
+        if i < context_len:
+            # Causal: each context token attends to itself + previous
+            mask[0, 0, i, :i+1] = 0.0
+        else:
+            # Block tokens attend to ALL context tokens (full visibility)
+            mask[0, 0, i, :context_len] = 0.0
+            # Block tokens attend to ALL other block tokens (non-causal)
+            mask[0, 0, i, context_len:] = 0.0
+```
+
+- Context tokens (user prompt + image features) use standard causal masking
+- The `block_size` prediction tokens see each other (non-causal within the block)
+- All block tokens see the full context
+
+### Block Decoding Flow
+
+```
+LLM forward pass with MTP mask
+        │
+        ▼
+logits: (1, block_size, vocab)
+        │
+        ▼
+sample_tokens(logits, ...)
+  ├── top-1 greedy for non-coord positions
+  └── decode_bbox_avg() for coord positions
+        │
+        ▼
+6 decoded tokens: [<box>, d1_avg, d2_avg, d3_avg, d4_avg, </box>]
+        │
+        ▼
+handle_pattern(tokens)
+  ├── "coord_box"    → valid box, continue MTP
+  ├── "error_box"    → malformed box (hybrid: fallback to AR)
+  ├── "empty_box"    → <null> pattern, no box
+  ├── "im_end"       → generation end
+  └── "ref_object"   → text label token, switch to AR
+        │
+        ▼
+append tokens to generated sequence, repeat
+```
+
+### `sample_tokens()` algorithm
+
+1. Take logits from MTP block `(1, block_size, vocab)`
+2. Apply temperature + top-p sampling if configured
+3. Greedily sample `x0` for each of the `block_size` positions
+4. Identify coordinate positions: the 4 tokens after `<box>` (position 1–4 in the `[<box>, d1, d2, d3, d4, </box>]` pattern)
+5. Call `decode_bbox_avg()` on those positions
+
+### `decode_bbox_avg()` algorithm
+
+For each coordinate position in the block:
+
+1. Take the top-k (`keep_k_avg=4`) token logits within the coordinate token range `[COORD_START, COORD_START+1000]`
+2. Compute softmax over those top-k logits
+3. Weighted average of the coordinate values:
+   ```
+   avg_coord = sum(softmax_score_i * coord_value_i) / sum(scores)
+   ```
+4. Round to nearest integer in `[0, 1000]`
+5. In `hybrid` mode: only average if the top-1 probability is low AND the spread across candidates is wide
+6. In `fast` mode: always average
+
+This produces smoother box coordinates than naive top-1 argmax.
+
+### `handle_pattern()` classification
+
+The 6 decoded tokens are classified into pattern types:
+
+| Pattern | Condition | Action |
 |---|---|---|
-| `<\|image\|>` | 151665 | Image anchor in user text |
-| `<box>` | 151666 | Box start |
-| `</box>` | 151667 | Box end |
-| `<ref>` | 151668 | Reference/label start |
-| `</ref>` | 151669 | Reference/label end |
-| `<0>`–`<1000>` | 151670–152670 | Coordinate tokens (1001 bins) |
-| `<null>` | 152671 | No detection |
-| `<text_mask>` | 152672 | MTP mask token |
+| `coord_box` | 6 tokens = `[<box>, 4×coord, </box>]` | Continue MTP |
+| `error_box` | `<box>` present but missing/malformed coordinates | Hybrid: fallback to AR for this box |
+| `empty_box` | Contains `<null>` token | Skip, continue MTP |
+| `im_end` | Contains `im_end` token | Stop generation |
+| `ref_object` | Contains `<ref>` tag | Text decoding needed → AR |
 
-Total vocabulary: 152673 tokens (8 special + 1001 coord + base Qwen2.5 vocab).
+### Generation modes
 
-## Generation Modes
+| Mode | Behavior | Speed | When to use |
+|---|---|---|---|
+| `fast` | Always MTP, never falls back | Fastest | MoonViT only, when output quality is reliable |
+| `hybrid` (default) | MTP for box tokens, falls back to AR on `error_box`, resumes MTP after `</box>` | Fast | Recommended — balances speed and robustness |
+| `slow` | Pure autoregressive (`model.generate()`) | Baseline | Any VE, backward compatibility |
 
-Controlled by `InferenceConfig.mode` (`--mode {fast,hybrid,slow}`, default `hybrid`).
-
-### AR mode (`slow`)
-Standard `model.generate()` via HF `GenerationConfig`. Auto-regressive token-by-token.
-
-### PBD/Fast mode (`fast`)
-`model.generate_pbd()` predicts `block_size` tokens (default 6) in parallel using a non-causal MTP attention mask:
+### Dispatch logic
 
 ```python
-def create_mtp_attention_mask(context_len, block_size):
-    # Causal on context tokens
-    # Non-causal within the prediction block (all block tokens see each other)
+def predict(image, text):
+    if config.mode != 'slow' and model.is_moonvit:
+        model.generate_pbd(...)
+    else:
+        model.generate(...)  # standard HF GenerationConfig
 ```
 
-Block tokens are decoded via:
-1. `sample_tokens()` — top-1 from logits, with `decode_bbox_avg()` for coordinate averaging
-2. `decode_bbox_avg()` — averages top-k coordinate token logits for smoother box predictions
-3. `handle_pattern()` — classifies output (`coord_box`, `error_box`, `empty_box`, `im_end`)
+`predict_batch()` does not support PBD. When PBD is selected in `eval.py` (`--mode hybrid/fast` with MoonViT), it falls back to single-image `predict()` calls in a loop.
 
-### Hybrid mode (`hybrid`)
-Starts in MTP mode. On `error_box` pattern, falls back to AR for that box. On `</box>` token in AR, resumes MTP.
+---
 
-### Inference dispatch
-```python
-if mode != 'slow' and is_moonvit:
-    model.generate_pbd(...)
-else:
-    model.generate(...)
-```
-
-`predict_batch()` does not support PBD; when PBD is selected in `eval.py`, it uses single-image `predict()` in a loop.
-
-## Training
-
-Standard autoregressive next-token prediction via HuggingFace `Trainer`. No MTP loss during training.
+## 7. Training Pipeline
 
 ### Loss
-Cross-entropy on LLM output logits. Labels mask user text (set to `IGNORE_INDEX=-100`), only compute loss on assistant (GPT) response tokens including coordinate tokens.
+Standard cross-entropy on LLM logits. Labels are masked with `IGNORE_INDEX=-100` for user/human text tokens — loss is only computed on the assistant (GPT) response span, which includes the `<ref>cat</ref><box><d1><d2><d3><d4></box>` tokens. No MTP loss; PBD is inference-only.
 
 ### Data augmentation
-When `data_augment=True` in recipe config: with 50% probability, randomly resize image long edge to `[640, 2560]` preserving aspect ratio, then resize to model input size. This matches LocateAnything's augmentation strategy.
+When `data_augment=True` per dataset in the recipe config:
+
+1. Load image at original resolution
+2. With 50% probability: randomly pick target long-edge length in `[640, 2560]`, resize preserving aspect ratio using `Image.LANCZOS`
+3. Always: final resize to model input size (e.g., 224×224) + ToTensor + Normalize `(mean=0.5, std=0.5)`
+
+This matches the LocateAnything augmentation strategy. The random long-edge resize introduces scale diversity without distorting aspect ratios.
 
 ### Sequence packing
-`PackedDetectionDataset` greedily concatenates samples up to `max_packed_tokens` per item. Each sample gets its own `position_ids` starting from 0. `PackedDataCollator` stacks with `sub_sample_lengths` for per-sample causal masking.
+`PackedDetectionDataset` greedily concatenates samples into a single sequence up to `max_packed_tokens` (default 2048): each sample's `input_ids`, `labels`, and `position_ids` are concatenated, with each sample's `position_ids` starting from 0. The model uses `sub_sample_lengths` to create per-sample causal boundaries.
 
 ### Epoch visualization
-`TrainVisCallback` saves `epoch_N.jpg` at train start and after each epoch showing 8 random augmentations per image.
+`TrainVisCallback` saves `epoch_N.jpg` at training start (epoch 0) and after each epoch, showing 8 random augmentations per sampled image in a grid. Automatically enabled; no flag required.
 
-## Coordinate System
+### Box coordinate accuracy during training
+Since coordinates are discrete tokens, the model must learn to predict exact integer values in `[0, 1000]`. At 224×224 resolution, one token step ≈ 0.224 pixels (for 224-wide images) or larger for higher-resolution images. This is sufficient for detection tasks where IoU-based metrics tolerate sub-pixel imprecision.
 
-- Coordinates are quantized to `[0, 1000]` integer bins (1001 tokens)
-- Stored in JSONL as `<d1><d2><d3><d4>` within `<box>` tags
-- Denormalized to pixel space via `pixel = coord * image_dim / 1000`
-- Both GT and predictions are denormalized before metric computation in `eval.py` using each image's actual width/height
+---
 
-## Evaluation Metrics
+## 8. Inference & Evaluation
 
-Standard COCO evaluation:
-- `AP`: mean Average Precision @ IoU thresholds 0.50:0.05:0.95
-- Per-threshold metrics: `AP@0.50`, `AP@0.75`, `AP@0.90`
-- `F1`, `Precision`, `Recall` at each threshold
+### Box parsing
+Generated text is parsed via regex:
 
-Computed in `eval.py` via `compute_coco_ap()` (11-point interpolation) and `compute_precision_recall()`.
+```python
+# Primary pattern (with label)
+r"<ref>([^<]*)</ref><box><(\d+)><(\d+)><(\d+)><(\d+)></box>"
+# Bare pattern (no label)
+r"<box><(\d+)><(\d+)><(\d+)><(\d+)></box>"
+# Fallback for malformed output
+r"<(\d+)><(\d+)><(\d+)><(\d+)></box>"
+```
 
-## Key Design Decisions
+Returns `List[List[float]]` with 4-element boxes `[x1, y1, x2, y2]` in 0-1000 token space.
 
-- **Discrete tokens over regression**: Cross-entropy provides per-class supervision through full model (LM head → LLM → projector → VE). Gradients flow to all components, unlike MSE regression on a separate head.
-- **LoRA on LLM** (r=64–128): Makes training feasible on 4GB GPU while allowing the LLM to learn image-dependent hidden states at coordinate positions.
-- **Optional VE LoRA** (`--use_backbone_lora N`): LoRA on VE attention/MLP for fine-grained visual adaptation.
-- **Untied LM head** (`tie_word_embeddings=False`): Coordinate token LM head trains independently from input embeddings.
-- **Frozen VE by default**: Saves memory; projector + LoRA adapt visual features to LLM space.
+### Coordinate denormalization
+Both GT and prediction boxes are converted from token space to pixel space per-image:
+
+```
+x1_pixel = x1_token * img_width / 1000
+y1_pixel = y1_token * img_height / 1000
+```
+
+This is done in `eval.py` via `_denorm_boxes()` and within `inference.py`'s `_parse_boxes()` method.
+
+### Metrics
+Standard COCO evaluation computed in `eval.py`:
+
+| Metric | Method | Description |
+|---|---|---|
+| `AP` | `compute_coco_ap()` | Mean AP @ IoU 0.50:0.05:0.95 (11-point interpolation) |
+| `AP@0.50` | same | PASCAL VOC standard |
+| `AP@0.75` | same | Strict localization |
+| `mean_iou` | `compute_iou()` | Mean pairwise IoU |
+| `Precision`/`Recall`/`F1` | `compute_precision_recall()` | Per-threshold + mean |
+
+---
+
+## 9. Files
+
+| File | Responsibility |
+|---|---|
+| `model.py` | `LocateAnythingForDetection` — dual VE dispatch, projector, `generate_pbd()`, `forward()` |
+| `modeling_vit.py` | `MoonViTModel` — 27-layer ViT, 2D RoPE, patch merge |
+| `generate_utils.py` | `sample_tokens()`, `decode_bbox_avg()`, `handle_pattern()`, `create_mtp_attention_mask()` |
+| `config.py` | `ModelConfig`, `TrainingConfig`, `DataConfig`, `InferenceConfig`, CLI parser |
+| `utils.py` | Token constants, `setup_tokenizer()`, `parse_boxes_from_text()`, `load_image()` |
+| `dataset.py` | `DetectionDataset` (single + recipe), `PackedDetectionDataset`, `_SubDataset`, `parse_sharegpt_line()` |
+| `training.py` | `setup_training()` (HF Trainer), `DetectionDataCollator`, `PackedDataCollator`, `TrainVisCallback` |
+| `inference.py` | `DetectionInferenceEngine.predict()`, `predict_batch()`, `_parse_boxes()`, `visualize_prediction()` |
+| `eval.py` | `run_benchmark()`, `benchmark_on_jsonl()`, `compute_coco_ap()`, `compute_iou()` |
+
+---
+
+## 10. Key Design Decisions
+
+- **Discrete tokens over regression**: Cross-entropy provides per-class supervision through all layers. Gradients flow to the full model, unlike MSE on a separate head where gradients are shallow.
+- **LoRA on LLM (r=128)**: Makes training feasible on 4GB GPU while allowing the LLM to learn image-dependent hidden states at coordinate positions.
+- **Optional VE LoRA** (`--use_backbone_lora N`): Enables fine-grained visual feature adaptation without full VE fine-tuning.
+- **Untied LM head** (`tie_word_embeddings=False`): Allows coordinate token LM head to train independently from the input embedding matrix.
+- **Frozen VE by default**: Saves memory (VE is 93–408M params); projector + LoRA adapt visual features to LLM space.
+- **PBD over pure AR**: Parallel box decoding with MTP masks provides 2–4× speedup on MoonViT while maintaining accuracy through `decode_bbox_avg()` and hybrid fallback.
+- **1000 bins over 100–10000**: 1000 bins provides ~0.22 pixel precision at 224×224 resolution — sufficient for detection while keeping vocabulary size manageable.
