@@ -577,7 +577,6 @@ class LocateAnythingForDetection(PreTrainedModel):
         all_confs = []
         use_mtp = generation_mode in ('fast', 'hybrid')
         tok_ids = self.token_ids or get_token_ids_from_config(self.model_config)
-        coord_start_token_id = tok_ids['coord_start_token_id']
         im_end_token_id = tok_ids['im_end_token_id']
         box_end_token_id = tok_ids['box_end_token_id']
 
@@ -614,15 +613,6 @@ class LocateAnythingForDetection(PreTrainedModel):
                 new_tokens = x0[0] if is_box_empty else box_avg[0]
                 out = handle_pattern(new_tokens, tok_ids, generation_mode)
 
-                # Track per-token confidences
-                for i, t in enumerate(new_tokens):
-                    t_id = t.item()
-                    if is_box_empty or not (coord_start_token_id <= t_id <= coord_start_token_id + 1000):
-                        p = probs[0, i, t_id].item()
-                    else:
-                        p = probs[0, i, t_id].item()
-                    all_confs.append(p)
-
                 if out['type'] == 'im_end':
                     break
 
@@ -636,6 +626,12 @@ class LocateAnythingForDetection(PreTrainedModel):
                 cur_embeds = torch.cat([cur_embeds, self.llm.get_input_embeddings()(out_ids)], dim=1)
                 cur_mask = torch.cat([cur_mask, torch.ones(1, out_ids.shape[1], device=device)], dim=1)
                 generated = torch.cat([generated, out_ids], dim=1)
+
+                # Track per-token confidences — only for tokens actually appended
+                for j in range(len(out_tokens)):
+                    t_id = out_tokens[j]
+                    p = probs[0, j, t_id].item()
+                    all_confs.append(p)
             else:
                 ctx_len = cur_embeds.shape[1]
                 last_emb = cur_embeds[:, -1:, :]
