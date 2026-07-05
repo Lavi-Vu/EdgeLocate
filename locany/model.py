@@ -715,15 +715,16 @@ def _safe_load_state_dict(model, state_dict: dict, label: str = ""):
     model.load_state_dict(to_load, strict=False)
 
 
-def load_model_from_dir(model_dir: str, tokenizer) -> LocateAnythingForDetection:
+def load_model_from_dir(model_dir: str, tokenizer, model_cfg: Optional[ModelConfig] = None) -> LocateAnythingForDetection:
     import json, os, torch
-    cfg_path = os.path.join(model_dir, "locany_config.json")
-    if os.path.exists(cfg_path):
-        with open(cfg_path) as f:
-            cfg_dict = json.load(f)
-        model_cfg = ModelConfig.from_dict(cfg_dict)
-    else:
-        model_cfg = ModelConfig()
+    if model_cfg is None:
+        cfg_path = os.path.join(model_dir, "locany_config.json")
+        if os.path.exists(cfg_path):
+            with open(cfg_path) as f:
+                cfg_dict = json.load(f)
+            model_cfg = ModelConfig.from_dict(cfg_dict)
+        else:
+            model_cfg = ModelConfig()
 
     model_cfg.use_lora = False
     model = create_model(model_cfg)

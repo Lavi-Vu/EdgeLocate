@@ -39,23 +39,36 @@ def main():
     parser.add_argument("--top_p", type=float, default=1.0)
     parser.add_argument("--mode", default="hybrid", choices=["fast", "hybrid", "slow"],
                         help="Generation mode: fast (PBD only), hybrid (PBD+AR fallback), slow (AR only)")
+    parser.add_argument("--ve_model", default=None,
+                        help="Override vision encoder model (e.g., google/siglip2-base-patch16-naflex)")
+    parser.add_argument("--llm_model", default=None,
+                        help="Override LLM model (e.g., Qwen/Qwen2.5-0.5B-Instruct)")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    print(f"Loading model from {args.model_dir} ...")
-    tokenizer = setup_tokenizer(ModelConfig())
-
-    if os.path.exists(os.path.join(args.model_dir, "adapter_config.json")):
-        tokenizer = setup_tokenizer(ModelConfig())
-        model = load_model_from_dir(args.model_dir, tokenizer)
-    elif os.path.exists(args.model_dir):
-        tokenizer = setup_tokenizer(ModelConfig())
-        model = load_model_from_dir(args.model_dir, tokenizer)
+    # Read saved config from checkpoint, with CLI overrides
+    import json
+    cfg_path = os.path.join(args.model_dir, "locany_config.json")
+    if os.path.exists(cfg_path):
+        with open(cfg_path) as f:
+            cfg_dict = json.load(f)
+        model_cfg = ModelConfig.from_dict(cfg_dict)
+        print(f"Loaded config: VE={model_cfg.ve_model}, LLM={model_cfg.llm_model}")
     else:
-        print(f"Model directory not found: {args.model_dir}")
-        sys.exit(1)
+        model_cfg = ModelConfig()
+        print(f"No locany_config.json found, using default: VE={model_cfg.ve_model}")
+    if args.ve_model:
+        model_cfg.ve_model = args.ve_model
+        print(f"Overriding VE: {model_cfg.ve_model}")
+    if args.llm_model:
+        model_cfg.llm_model = args.llm_model
+        print(f"Overriding LLM: {model_cfg.llm_model}")
+
+    print(f"Loading model from {args.model_dir} ...")
+    tokenizer = setup_tokenizer(model_cfg)
+    model = load_model_from_dir(args.model_dir, tokenizer, model_cfg=model_cfg)
 
     model = model.to(device)
     model.eval()
