@@ -107,6 +107,14 @@ class _DetectionTrainer(Trainer):
         if output_dir is None:
             output_dir = self.args.output_dir
         save_adapter_and_extra(self.model, output_dir, self.processing_class)
+        # Save model config at every checkpoint so inference can load the right VE/LLM
+        cfg = getattr(self.model, 'model_config', None)
+        if cfg is None and hasattr(self.model, 'base_model'):
+            cfg = getattr(self.model.base_model, 'model_config', None)
+        if cfg is not None:
+            cfg_path = os.path.join(output_dir, "locany_config.json")
+            with open(cfg_path, "w") as f:
+                json.dump(cfg.to_dict(), f, indent=2)
 
 
 def save_adapter_and_extra(model, output_dir: str, tokenizer=None):

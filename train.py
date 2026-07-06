@@ -135,6 +135,13 @@ def run_training(
         tokenizer=tokenizer,
     )
 
+    # Save config so intermediate checkpoints have VE/LLM info for inference
+    os.makedirs(train_cfg.output_dir, exist_ok=True)
+    cfg_path = os.path.join(train_cfg.output_dir, "locany_config.json")
+    with open(cfg_path, "w") as f:
+        json.dump(model_cfg.to_dict(), f, indent=2)
+    logger.info(f"Config saved to {cfg_path}")
+
     logger.info("Starting training...")
     trainer.train()
 
