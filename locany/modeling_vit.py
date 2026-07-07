@@ -315,7 +315,7 @@ def patch_merger(
 class MoonVitPretrainedModel(PreTrainedModel):
     config_class = MoonViTConfig
     model_type = "moonvit"
-    _no_split_modules = ["PackingTransformer"]
+    _no_split_modules = ["MoonVitEncoderLayer"]
     _supports_flash_attn_2 = True
     _supports_sdpa = True
     supports_gradient_checkpointing = True

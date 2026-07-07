@@ -9,8 +9,6 @@ from typing import Dict, List, Optional, Tuple
 class ModelConfig:
     llm_model: str = "Qwen/Qwen2.5-0.5B-Instruct"
     ve_model: str = "google/siglip-base-patch16-224"
-    ve_hidden_size: int = 768
-    llm_hidden_size: int = 896
     llm_max_length: int = 2048
     max_boxes: int = 32
     coord_bins: int = 1001
@@ -35,8 +33,6 @@ class ModelConfig:
         return {
             "llm_model": self.llm_model,
             "ve_model": self.ve_model,
-            "ve_hidden_size": self.ve_hidden_size,
-            "llm_hidden_size": self.llm_hidden_size,
             "llm_max_length": self.llm_max_length,
             "max_boxes": self.max_boxes,
             "coord_bins": self.coord_bins,
@@ -56,15 +52,6 @@ class ModelConfig:
             "block_size": self.block_size,
             "generation_mode": self.generation_mode,
             "n_future_tokens": self.n_future_tokens,
-            "box_start_token_id": 151666,
-            "box_end_token_id": 151667,
-            "ref_start_token_id": 151668,
-            "ref_end_token_id": 151669,
-            "coord_start_token_id": 151670,
-            "coord_end_token_id": 151670 + 1000,
-            "none_token_id": 4064,
-            "null_token_id": 152671,
-            "im_end_token_id": 151645,
         }
 
     @staticmethod
@@ -91,10 +78,7 @@ class TrainingConfig:
     save_total_limit: int = 3
     lr_scheduler_type: str = "cosine"
     max_grad_norm: float = 1.0
-    block_size: int = 2048
-    packing: bool = False
     seed: int = 42
-    use_online_packing: bool = False
 
 
 @dataclass
@@ -133,8 +117,6 @@ def parse_args():
     model_group = parser.add_argument_group("Model")
     model_group.add_argument("--llm_model", default="Qwen/Qwen2.5-0.5B-Instruct")
     model_group.add_argument("--ve_model", default="google/siglip-base-patch16-224")
-    model_group.add_argument("--ve_hidden_size", type=int, default=768)
-    model_group.add_argument("--llm_hidden_size", type=int, default=896)
     model_group.add_argument("--max_boxes", type=int, default=32)
     model_group.add_argument("--freeze_llm", action="store_true", default=False)
     model_group.add_argument("--no-freeze_llm", action="store_false", dest="freeze_llm")
@@ -171,7 +153,6 @@ def parse_args():
     train_group.add_argument("--save_total_limit", type=int, default=3)
     train_group.add_argument("--lr_scheduler_type", default="cosine")
     train_group.add_argument("--max_grad_norm", type=float, default=1.0)
-    train_group.add_argument("--packing", action="store_true", default=False)
     train_group.add_argument("--seed", type=int, default=42)
 
     data_group = parser.add_argument_group("Data")
@@ -212,8 +193,6 @@ def parse_args():
     model_cfg = ModelConfig(
         llm_model=args.llm_model,
         ve_model=args.ve_model,
-        ve_hidden_size=args.ve_hidden_size,
-        llm_hidden_size=args.llm_hidden_size,
         max_boxes=args.max_boxes,
         freeze_llm=args.freeze_llm,
         freeze_vision_encoder=args.freeze_vision_encoder,
@@ -248,8 +227,6 @@ def parse_args():
         save_total_limit=args.save_total_limit,
         lr_scheduler_type=args.lr_scheduler_type,
         max_grad_norm=args.max_grad_norm,
-        block_size=args.block_size,
-        packing=args.packing,
         seed=args.seed,
     )
 

@@ -29,10 +29,15 @@ LOCANY_SPECIAL_TOKENS = list(SPECIAL_TOKENS.values()) + COORD_TOKENS + ["<null>"
 BOX_START_TOKEN_ID = 151666
 BOX_END_TOKEN_ID = 151667
 COORD_START_ID = 151670
+COORD_END_ID = COORD_START_ID + 1000  # 152670
 REF_START_TOKEN_ID = 151668
 REF_END_TOKEN_ID = 151669
 NULL_TOKEN_ID = 152671
 TEXT_MASK_TOKEN_ID = 152672
+
+# Token id of the literal word "none" in the Qwen2.5 vocab — used as the
+# no-detection marker inside empty boxes: <box><none></box>.
+NONE_TOKEN_ID = 4064
 
 IMAGE_TOKEN_ID = 151665
 IM_END_TOKEN_ID = 151645
@@ -172,6 +177,8 @@ def setup_tokenizer(model_cfg) -> AutoTokenizer:
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.chat_template = DEFAULT_CHAT_TEMPLATE
+    logger.info(f"Tokenizer loaded: {model_cfg.llm_model} (vocab={len(tokenizer)}, "
+                f"added {len(COORD_TOKENS)} coord tokens + special tokens)")
     return tokenizer
 
 

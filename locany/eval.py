@@ -313,73 +313,22 @@ def evaluate_model(
     eval_dataset,
     iou_threshold: float = 0.5,
     max_samples: Optional[int] = None,
+    mode: str = "slow",
 ) -> Dict[str, float]:
-    """Legacy evaluation entry point used by train.py."""
-    from .config import InferenceConfig
-    from .inference import DetectionInferenceEngine
-    from .utils import parse_boxes_from_text
-    from PIL import Image
-    import numpy as np
-    import transformers
+    """Evaluation entry point used by ``train.py --action eval``.
 
-    inf_cfg = InferenceConfig(max_new_tokens=512)
-    engine = DetectionInferenceEngine(model, tokenizer, inf_cfg)
-    device = next(model.parameters()).device
-
-    all_ious = []
-    all_precisions = []
-    all_recalls = []
-
-    from tqdm import tqdm
-    iterator = tqdm(range(len(eval_dataset)))
-    for i in iterator:
-        if max_samples and i >= max_samples:
-            break
-        sample = eval_dataset[i]
-        pixel_values = sample["pixel_values"].unsqueeze(0).to(device)
-        input_ids = sample["input_ids"].unsqueeze(0).to(device)
-        attention_mask = sample["attention_mask"].unsqueeze(0).to(device)
-
-        label_ids = sample["labels"]
-        label_text = tokenizer.decode(label_ids.tolist(), skip_special_tokens=False)
-        gt_boxes = parse_boxes_from_text(label_text)
-
-        gen_config = transformers.GenerationConfig(
-            max_new_tokens=512, do_sample=False,
-            pad_token_id=tokenizer.pad_token_id,
-            eos_token_id=tokenizer.eos_token_id,
-        )
-        generated = model.generate(
-            pixel_values=pixel_values,
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            generation_config=gen_config,
-        )
-        full_ids = generated.sequences if hasattr(generated, "sequences") else generated
-        text_out = tokenizer.decode(full_ids[0], skip_special_tokens=False)
-        pred_boxes = parse_boxes_from_text(text_out)
-
-        if gt_boxes and pred_boxes:
-            box_ious = [compute_iou(p, g) for p in pred_boxes for g in gt_boxes]
-            all_ious.append(max(box_ious))
-            precision, recall, _ = compute_precision_recall(pred_boxes, gt_boxes, iou_threshold)
-            all_precisions.append(precision)
-            all_recalls.append(recall)
-        elif pred_boxes and not gt_boxes:
-            all_precisions.append(0.0)
-            all_recalls.append(0.0)
-        elif not pred_boxes and gt_boxes:
-            all_precisions.append(0.0)
-            all_recalls.append(0.0)
-
-        iterator.set_postfix({"samples": i + 1})
-
-    return {
-        "num_samples": len(all_precisions),
-        "mean_iou": float(np.mean(all_ious)) if all_ious else 0.0,
-        "mean_precision": float(np.mean(all_precisions)) if all_precisions else 0.0,
-        "mean_recall": float(np.mean(all_recalls)) if all_recalls else 0.0,
-    }
+    Delegates to :func:`run_benchmark`, which pulls ground truth from the raw
+    conversations (so label ``-100`` masking is never decoded), honors the PBD
+    generation ``mode``, and reports COCO AP in addition to mean IoU/P/R. The
+    ``DetectionDataset`` passed in already carries ``image_dir`` and ``data``
+    on its raw lines, which ``run_benchmark`` reads directly.
+    """
+    image_dir = getattr(eval_dataset, "image_dir", "")
+    return run_benchmark(
+        model, tokenizer, eval_dataset, image_dir,
+        max_samples=max_samples, iou_threshold=iou_threshold,
+        batch_size=1, mode=mode,
+    )
 
 
 def benchmark_on_jsonl(

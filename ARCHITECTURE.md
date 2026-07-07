@@ -84,14 +84,16 @@ The core design choice: bounding box coordinates are **vocabulary tokens**, not 
 
 ### Coordinate encoding (pixel → token)
 
-During data preparation, COCO pixel coordinates `(x1, y1, x2, y2)` are quantized to `[0, 1000]` integer bins:
+During data preparation, COCO pixel coordinates `(x1, y1, x2, y2)` are quantized to `[0, 1000]` integer bins, **rounded to nearest** (matching `boxes_to_tokens` in `locany/utils.py`):
 
 ```
-x1_token = int(x1_pixel * 1000 / img_width)
-y1_token = int(y1_pixel * 1000 / img_height)
-x2_token = int(x2_pixel * 1000 / img_width)
-y2_token = int(y2_pixel * 1000 / img_height)
+x1_token = int(round(x1_pixel * 1000 / img_width))
+y1_token = int(round(y1_pixel * 1000 / img_height))
+x2_token = int(round(x2_pixel * 1000 / img_width))
+y2_token = int(round(y2_pixel * 1000 / img_height))
 ```
+
+The result is then `clamp`d to `[0, 1000]` so out-of-bounds boxes still serialize cleanly.
 
 These become vocabulary tokens `<d1>`, `<d2>`, `<d3>`, `<d4>` (IDs 151670–152670), serialized as:
 
@@ -179,7 +181,7 @@ Linear(4608 → 896) → LayerNorm → GELU → Dropout → Linear(896 → 896)
 Base: `Qwen/Qwen2.5-0.5B-Instruct` (12 layers, 896 hidden dim, 0.5B params).
 
 ### LoRA
-Applied to all attention projection matrices (`q_proj`, `k_proj`, `v_proj`, `o_proj`) with rank `r=128`, alpha=256. Only LoRA weights + projector + LM head are trainable (~37M params). The base LLM and VE stay frozen.
+Applied to all attention projection matrices (`q_proj`, `k_proj`, `v_proj`, `o_proj`) **and the MLP gate/up/down projections** (`gate_proj`, `up_proj`, `down_proj`) with rank `r=128`, alpha=256. Only LoRA weights + projector + LM head are trainable (~37M params). The base LLM and VE stay frozen.
 
 ### Visual feature merge
 The `<|image|>` token (ID 151665) in the user prompt's embedding sequence is **replaced** by the projected visual features. The LLM sees a sequence like:
@@ -319,9 +321,6 @@ When `data_augment=True` per dataset in the recipe config:
 
 This matches the LocateAnything augmentation strategy. The random long-edge resize introduces scale diversity without distorting aspect ratios.
 
-### Sequence packing
-`PackedDetectionDataset` greedily concatenates samples into a single sequence up to `max_packed_tokens` (default 2048): each sample's `input_ids`, `labels`, and `position_ids` are concatenated, with each sample's `position_ids` starting from 0. The model uses `sub_sample_lengths` to create per-sample causal boundaries.
-
 ### Epoch visualization
 `TrainVisCallback` saves `epoch_N.jpg` at training start (epoch 0) and after each epoch, showing 8 random augmentations per sampled image in a grid. Automatically enabled; no flag required.
 
@@ -364,7 +363,7 @@ Standard COCO evaluation computed in `eval.py`:
 | `AP` | `compute_coco_ap()` | Mean AP @ IoU 0.50:0.05:0.95 (11-point interpolation) |
 | `AP@0.50` | same | PASCAL VOC standard |
 | `AP@0.75` | same | Strict localization |
-| `mean_iou` | `compute_iou()` | Mean pairwise IoU |
+| `mean_iou` | `compute_iou()` | Per-image: best-match IoU (max over pred×gt pairs), averaged across the batch |
 | `Precision`/`Recall`/`F1` | `compute_precision_recall()` | Per-threshold + mean |
 
 ---
@@ -378,10 +377,10 @@ Standard COCO evaluation computed in `eval.py`:
 | `generate_utils.py` | `sample_tokens()`, `decode_bbox_avg()`, `handle_pattern()`, `create_mtp_attention_mask()` |
 | `config.py` | `ModelConfig`, `TrainingConfig`, `DataConfig`, `InferenceConfig`, CLI parser |
 | `utils.py` | Token constants, `setup_tokenizer()`, `parse_boxes_from_text()`, `load_image()` |
-| `dataset.py` | `DetectionDataset` (single + recipe), `PackedDetectionDataset`, `_SubDataset`, `parse_sharegpt_line()` |
-| `training.py` | `setup_training()` (HF Trainer), `DetectionDataCollator`, `PackedDataCollator`, `TrainVisCallback` |
+| `dataset.py` | `DetectionDataset` (single + recipe), `_SubDataset`, `parse_sharegpt_line()` |
+| `training.py` | `setup_training()` (HF Trainer), `DetectionDataCollator`, `TrainVisCallback` |
 | `inference.py` | `DetectionInferenceEngine.predict()`, `predict_batch()`, `_parse_boxes()`, `visualize_prediction()` |
-| `eval.py` | `run_benchmark()`, `benchmark_on_jsonl()`, `compute_coco_ap()`, `compute_iou()` |
+| `eval.py` | `run_benchmark()` (real benchmark), `benchmark_on_jsonl()` (file-based wrapper), `evaluate_model()` (thin wrapper that calls `run_benchmark` with single-sample defaults), `compute_coco_ap()`, `compute_iou()` |
 
 ---
 

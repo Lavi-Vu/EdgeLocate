@@ -19,11 +19,12 @@ IGNORE_INDEX = -100
 class TrainVisCallback:
     """Saves original vs augmented training images at epoch end."""
 
-    def __init__(self, dataset, image_dir, save_dir, num_samples=8):
+    def __init__(self, dataset, image_dir, save_dir, num_samples=8, image_size=(224, 224)):
         self.dataset = dataset
         self.image_dir = image_dir
         self.save_dir = save_dir
         self.num_samples = num_samples
+        self.image_size = (int(image_size[0]), int(image_size[1]))
         os.makedirs(save_dir, exist_ok=True)
         self._font = None
 
@@ -60,7 +61,10 @@ class TrainVisCallback:
                 if long_edge != target:
                     s = target / long_edge
                     img = img.resize((int(w * s), int(h * s)), Image.LANCZOS)
-            return img.resize((224, 224), Image.LANCZOS)
+            return img.resize(self.image_size, Image.LANCZOS)
+
+        tw, th = self.image_size
+        cell_w, cell_h = tw + 4, th + 4
 
         rows = []
         for sample in chosen:
@@ -72,8 +76,8 @@ class TrainVisCallback:
 
             tiles = []
             # Tile 0: no-augment baseline
-            base = Image.new("RGB", (224, 224), "white")
-            base.paste(orig.resize((224, 224), Image.LANCZOS), (0, 0))
+            base = Image.new("RGB", (tw, th), "white")
+            base.paste(orig.resize((tw, th), Image.LANCZOS), (0, 0))
             draw = ImageDraw.Draw(base)
             draw.text((2, 2), f"no aug", fill="red", font=self.font)
             draw.text((2, 14), f"{ow}x{oh}", fill="red", font=self.font)
@@ -82,7 +86,7 @@ class TrainVisCallback:
             # Tiles 1-8: 8 independent augmentations
             for _ in range(8):
                 aug = _maybe_augment(orig.copy())
-                tile = Image.new("RGB", (224, 224), "white")
+                tile = Image.new("RGB", (tw, th), "white")
                 tile.paste(aug, (0, 0))
                 tiles.append(tile)
 
@@ -90,12 +94,12 @@ class TrainVisCallback:
 
         if not rows:
             return
-        grid_w = 9 * 228
-        grid_h = len(rows) * 228
+        grid_w = 9 * cell_w
+        grid_h = len(rows) * cell_h
         grid = Image.new("RGB", (grid_w, grid_h), "gray")
         for ri, r in enumerate(rows):
             for ci, t in enumerate(r):
-                grid.paste(t, (ci * 228 + 2, ri * 228 + 2))
+                grid.paste(t, (ci * cell_w + 2, ri * cell_h + 2))
         out = os.path.join(self.save_dir, f"epoch_{epoch}.jpg")
         grid.save(out)
         logger.info(f"Saved training pipeline vis: {out}")
@@ -194,7 +198,10 @@ def setup_training(model, model_cfg: ModelConfig, train_cfg: TrainingConfig,
 
     # Add training visualization callback (start + each epoch)
     vis_dir = os.path.join(train_cfg.output_dir, "epoch_vis")
-    _vis_helper = TrainVisCallback(train_dataset, train_dataset.image_dir, vis_dir)
+    _vis_helper = TrainVisCallback(
+        train_dataset, train_dataset.image_dir, vis_dir,
+        image_size=getattr(train_dataset, "image_size", (224, 224)),
+    )
 
     class _VisCB(TrainerCallback):
         def on_train_begin(self, args, state, control, **kwargs):
@@ -223,20 +230,6 @@ class DetectionDataCollator:
         batch["input_ids"] = pad_sequence(input_ids, batch_first=True, padding_value=self.tokenizer.pad_token_id)
         batch["attention_mask"] = pad_sequence(attention_mask, batch_first=True, padding_value=0)
         batch["labels"] = pad_sequence(labels, batch_first=True, padding_value=IGNORE_INDEX)
-        return batch
-
-
-class PackedDataCollator:
-    """Collator for PackedDetectionDataset that stacks sub_sample_lengths and position_ids."""
-
-    def __call__(self, features):
-        batch = {}
-        batch["pixel_values"] = torch.stack([f["pixel_values"] for f in features])
-        batch["input_ids"] = torch.stack([f["input_ids"] for f in features])
-        batch["labels"] = torch.stack([f["labels"] for f in features])
-        batch["attention_mask"] = torch.stack([f["attention_mask"] for f in features])
-        batch["position_ids"] = torch.stack([f["position_ids"] for f in features])
-        batch["sub_sample_lengths"] = torch.stack([f["sub_sample_lengths"] for f in features])
         return batch
 
 

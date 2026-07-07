@@ -12,8 +12,8 @@ from transformers import (
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from .config import ModelConfig
-from .utils import logger
-from .generate_utils import get_token_ids_from_config, sample_tokens, handle_pattern
+from .utils import logger, SPECIAL_TOKENS
+from .generate_utils import get_token_ids_from_config, sample_tokens, handle_pattern, BOX_DECODE_FAILED
 
 DTYPE_MAP = {
     "float32": torch.float32,
@@ -269,14 +269,16 @@ class LocateAnythingForDetection(PreTrainedModel):
         ve_hidden = self.vision_encoder.get_hidden_size()
         self.is_moonvit = self.vision_encoder.is_moonvit
 
-        if self.is_moonvit:
-            self.projector = MoonViTProjector(ve_hidden, config.llm_hidden_size, dtype=dtype)
-        else:
-            self.projector = MLPProjector(ve_hidden, config.llm_hidden_size,
-                                          num_layers=config.mlp_connector_layers).to(dtype=dtype)
-
         llm_config = AutoConfig.from_pretrained(config.llm_model, trust_remote_code=True)
         llm_config.tie_word_embeddings = config.use_lora and not config.freeze_llm
+        llm_hidden = llm_config.hidden_size  # projector output dim must match the loaded LLM
+
+        if self.is_moonvit:
+            self.projector = MoonViTProjector(ve_hidden, llm_hidden, dtype=dtype)
+        else:
+            self.projector = MLPProjector(ve_hidden, llm_hidden,
+                                          num_layers=config.mlp_connector_layers).to(dtype=dtype)
+
         llm_kwargs = dict(config=llm_config, dtype=dtype, attn_implementation=config.attn_implementation)
         self.llm = AutoModelForCausalLM.from_pretrained(config.llm_model, **llm_kwargs)
 
@@ -343,7 +345,6 @@ class LocateAnythingForDetection(PreTrainedModel):
             logger.warning("PEFT not installed, skipping backbone LoRA")
 
     def set_image_token_id(self, tokenizer):
-        from .utils import SPECIAL_TOKENS
         self.image_token_id = tokenizer.convert_tokens_to_ids(SPECIAL_TOKENS["image"])
         self.token_ids = get_token_ids_from_config(self.model_config)
         logger.info(f"Set image_token_id={self.image_token_id}")
@@ -457,28 +458,20 @@ class LocateAnythingForDetection(PreTrainedModel):
         return torch.stack(new_labels_list)
 
     def forward(self, pixel_values=None, input_ids=None, attention_mask=None,
-                labels=None, output_hidden_states=None, return_dict=None,
-                position_ids=None, sub_sample_lengths=None, **kwargs):
+                labels=None, output_hidden_states=None, return_dict=None, **kwargs):
         return_dict = return_dict if return_dict is not None else True
         output_hidden_states = output_hidden_states if output_hidden_states is not None else False
 
-        is_packed = sub_sample_lengths is not None
-
-        if not is_packed and pixel_values is not None and input_ids is not None and self.image_token_id is not None:
+        if pixel_values is not None and input_ids is not None and self.image_token_id is not None:
             merged_embeds, merged_mask, merged_ids = self.merge_visual_features(
                 pixel_values, input_ids, attention_mask,
             )
-            if merged_embeds is None:
-                merged_embeds = None
-                merged_mask = attention_mask
-                merged_ids = input_ids
         else:
-            merged_embeds = None
-            merged_mask = attention_mask
-            merged_ids = input_ids
+            merged_embeds, merged_mask, merged_ids = None, attention_mask, input_ids
 
-        if labels is not None and not is_packed and pixel_values is not None and self.image_token_id is not None and (input_ids == self.image_token_id).any():
-            if self.is_moonvit and pixel_values is not None:
+        if labels is not None and pixel_values is not None and self.image_token_id is not None \
+                and (input_ids == self.image_token_id).any():
+            if self.is_moonvit:
                 ps = self.vision_encoder._patch_size
                 kh, kw = self.vision_encoder.merge_kernel_size
                 actual_h = pixel_values.shape[2] // ps // kh
@@ -494,29 +487,11 @@ class LocateAnythingForDetection(PreTrainedModel):
             labels=expanded_labels,
             output_hidden_states=output_hidden_states, return_dict=True,
         )
-
-        if is_packed:
-            llm_kwargs["input_ids"] = input_ids
-            llm_kwargs["position_ids"] = position_ids
-            batch_size, seq_len = input_ids.shape
-            device = input_ids.device
-            causal_mask = torch.full((1, 1, seq_len, seq_len), float('-inf'), device=device, dtype=merged_embeds.dtype if merged_embeds is not None else torch.float32)
-            cumsum = sub_sample_lengths.cumsum(dim=1)
-            prev = 0
-            for b in range(batch_size):
-                for i in range(sub_sample_lengths.shape[1]):
-                    end = cumsum[b, i].item()
-                    causal_mask[b, 0, prev:end, :end] = 0.0
-                    for j in range(prev, end):
-                        causal_mask[b, 0, j, :j + 1] = 0.0
-                    prev = end
-            llm_kwargs["attention_mask"] = causal_mask
+        if merged_embeds is not None:
+            llm_kwargs["inputs_embeds"] = merged_embeds
         else:
-            if merged_embeds is not None:
-                llm_kwargs["inputs_embeds"] = merged_embeds
-            else:
-                llm_kwargs["input_ids"] = merged_ids
-            llm_kwargs["attention_mask"] = merged_mask
+            llm_kwargs["input_ids"] = merged_ids
+        llm_kwargs["attention_mask"] = merged_mask
 
         outputs = self.llm(**llm_kwargs, **kwargs)
 
@@ -556,6 +531,10 @@ class LocateAnythingForDetection(PreTrainedModel):
         device = input_ids.device
         batch_size, seq_len = input_ids.shape
         assert batch_size == 1, "PBD only supports batch_size=1"
+        assert block_size == 6, (
+            f"generate_pbd requires block_size=6 (got {block_size}); the MTP decode "
+            "internals (handle_pattern, decode_bbox_avg) assume a 6-token box frame."
+        )
 
         vis_feats = self.extract_visual_features(pixel_values)
         if vis_feats.dim() == 2:
@@ -609,8 +588,8 @@ class LocateAnythingForDetection(PreTrainedModel):
                     temperature=temperature, top_p=top_p,
                     keep_k_avg=keep_k_avg, generation_mode=generation_mode,
                 )
-                is_box_empty = (box_avg[0] == 0).all()
-                new_tokens = x0[0] if is_box_empty else box_avg[0]
+                decode_failed = (box_avg[0] == BOX_DECODE_FAILED).all()
+                new_tokens = x0[0] if decode_failed else box_avg[0]
                 out = handle_pattern(new_tokens, tok_ids, generation_mode)
 
                 if out['type'] == 'im_end':
@@ -732,7 +711,7 @@ def load_model_from_dir(model_dir: str, tokenizer, model_cfg: Optional[ModelConf
     new_vocab = len(tokenizer)
     if new_vocab > old_vocab:
         model.llm.resize_token_embeddings(new_vocab, mean_resizing=False)
-    model.image_token_id = tokenizer.convert_tokens_to_ids("<|image|>")
+    model.image_token_id = tokenizer.convert_tokens_to_ids(SPECIAL_TOKENS["image"])
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 

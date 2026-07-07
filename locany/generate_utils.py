@@ -3,19 +3,36 @@ import torch.nn.functional as F
 import torch.distributions as dists
 from typing import Dict, Optional, List, Tuple
 
+from .utils import (
+    BOX_START_TOKEN_ID, BOX_END_TOKEN_ID,
+    COORD_START_ID, COORD_END_ID,
+    REF_START_TOKEN_ID, REF_END_TOKEN_ID,
+    NONE_TOKEN_ID, NULL_TOKEN_ID, IM_END_TOKEN_ID,
+)
 
-def get_token_ids_from_config(config) -> Dict[str, int]:
-    token_ids = {}
-    token_ids['box_start_token_id'] = getattr(config, 'box_start_token_id', 151666)
-    token_ids['box_end_token_id'] = getattr(config, 'box_end_token_id', 151667)
-    token_ids['coord_start_token_id'] = getattr(config, 'coord_start_token_id', 151670)
-    token_ids['coord_end_token_id'] = getattr(config, 'coord_end_token_id', 152670)
-    token_ids['ref_start_token_id'] = getattr(config, 'ref_start_token_id', 151668)
-    token_ids['ref_end_token_id'] = getattr(config, 'ref_end_token_id', 151669)
-    token_ids['none_token_id'] = getattr(config, 'none_token_id', 4064)
-    token_ids['null_token_id'] = getattr(config, 'null_token_id', 152671)
-    token_ids['im_end_token_id'] = getattr(config, 'im_end_token_id', 151645)
-    return token_ids
+# Sentinel token id placed in a box_avg slot when decode_bbox_avg cannot decode a
+# legal box for that batch element. Keeps box_avg shape (B, 6) uniform (vs. the old
+# zeros(1) fallback that would break torch.stack for batch>1) and signals to the
+# caller that the raw argmax (x0) should be used instead.
+BOX_DECODE_FAILED = -1
+
+
+def get_token_ids_from_config(config=None) -> Dict[str, int]:
+    """Return the fixed special/coordinate token ids from locany.utils.
+
+    These ids are constants (see locany/utils.py), so the config argument is
+    accepted for call-site compatibility but ignored."""
+    return {
+        'box_start_token_id': BOX_START_TOKEN_ID,
+        'box_end_token_id': BOX_END_TOKEN_ID,
+        'coord_start_token_id': COORD_START_ID,
+        'coord_end_token_id': COORD_END_ID,
+        'ref_start_token_id': REF_START_TOKEN_ID,
+        'ref_end_token_id': REF_END_TOKEN_ID,
+        'none_token_id': NONE_TOKEN_ID,
+        'null_token_id': NULL_TOKEN_ID,
+        'im_end_token_id': IM_END_TOKEN_ID,
+    }
 
 
 def top_p_logits(logits: torch.Tensor, top_p: float = None) -> torch.Tensor:
@@ -88,7 +105,7 @@ def sample_tokens(logits, generated, token_ids, **generate_kwargs):
         return probs, confidence, x0, None
 
     box_avg = []
-    fallback_box = torch.zeros(1, dtype=x0.dtype, device=x0.device)
+    fallback_box = torch.full((6,), BOX_DECODE_FAILED, dtype=x0.dtype, device=x0.device)
     for b in range(batch_size):
         decoded_box = decode_bbox_avg(
             logits[b], probs[b], token_ids,

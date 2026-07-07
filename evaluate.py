@@ -35,12 +35,7 @@ from locany import (
     benchmark_on_jsonl,
     LOCANY_SPECIAL_TOKENS,
 )
-from transformers import AutoTokenizer
-
-
-def setup_tokenizer(model_cfg: ModelConfig):
-    from locany.utils import setup_tokenizer as _setup
-    return _setup(model_cfg)
+from locany.utils import setup_tokenizer
 
 
 def main():
@@ -62,7 +57,17 @@ def main():
     print(f"Device: {device}")
 
     print(f"Loading model from {args.model_dir} ...")
-    tokenizer = setup_tokenizer(ModelConfig())
+    # C6: read saved config so the tokenizer matches the trained VE/LLM.
+    cfg_path = os.path.join(args.model_dir, "locany_config.json")
+    if os.path.exists(cfg_path):
+        with open(cfg_path) as f:
+            cfg_dict = json.load(f)
+        model_cfg = ModelConfig.from_dict(cfg_dict)
+        print(f"Loaded config: VE={model_cfg.ve_model}, LLM={model_cfg.llm_model}")
+    else:
+        model_cfg = ModelConfig()
+        print(f"No locany_config.json found, using defaults")
+    tokenizer = setup_tokenizer(model_cfg)
     model = load_model_from_dir(args.model_dir, tokenizer)
     model = model.to(device)
     model.eval()

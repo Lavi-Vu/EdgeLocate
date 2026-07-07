@@ -37,22 +37,12 @@ from locany import (
     load_image,
     load_data_recipe,
 )
+from locany.utils import setup_tokenizer
 
 for h in logging.root.handlers[:]:
     logging.root.removeHandler(h)
 logging.basicConfig(level=logging.INFO, format="%(message)s", force=True)
 logger = logging.getLogger("train_locany")
-
-
-def setup_tokenizer(model_cfg: ModelConfig):
-    """Load tokenizer and add coordinate tokens plus special tokens."""
-    from locany.utils import setup_tokenizer as _setup, COORD_TOKENS
-
-    tokenizer = _setup(model_cfg)
-    logger.info(f"Tokenizer loaded: {model_cfg.llm_model}")
-    logger.info(f"Vocab size: {len(tokenizer)}")
-    logger.info(f"Added {len(COORD_TOKENS)} coordinate tokens + special tokens")
-    return tokenizer
 
 
 def resize_model_embeddings(model, tokenizer):
@@ -213,17 +203,16 @@ def run_evaluation(
     model_cfg: ModelConfig,
     train_cfg: TrainingConfig,
     data_cfg: DataConfig,
+    infer_cfg: InferenceConfig,
 ):
-    """Run model evaluation."""
+    """Run model evaluation on the saved checkpoint."""
     logger.info("=" * 60)
     logger.info("Starting Evaluation")
 
     tokenizer = setup_tokenizer(model_cfg)
-    model = create_model(model_cfg)
+    # Load the trained checkpoint rather than a fresh random model (B1).
+    model = load_model_for_inference(model_cfg, train_cfg.output_dir, tokenizer)
     model.eval()
-    resize_model_embeddings(model, tokenizer)
-    model.set_image_token_id(tokenizer)
-
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
 
@@ -238,7 +227,9 @@ def run_evaluation(
         data_recipe=eval_data_recipe,
     )
 
-    results = evaluate_model(model, tokenizer, eval_dataset, max_samples=50)
+    results = evaluate_model(
+        model, tokenizer, eval_dataset, max_samples=50, mode=infer_cfg.mode,
+    )
     logger.info("Evaluation Results:")
     for k, v in results.items():
         logger.info(f"  {k}: {v:.4f}" if isinstance(v, float) else f"  {k}: {v}")
@@ -247,26 +238,17 @@ def run_evaluation(
 def main():
     model_cfg, train_cfg, data_cfg, infer_cfg, action, no_download, max_train, max_val, args = parse_args()
 
-    import sys
-    extra_args = {}
-    if "--num_samples" in sys.argv:
-        idx = sys.argv.index("--num_samples")
-        extra_args["num_samples"] = int(sys.argv[idx + 1]) if idx + 1 < len(sys.argv) else 100
-    if "--max_boxes_per_image" in sys.argv:
-        idx = sys.argv.index("--max_boxes_per_image")
-        extra_args["max_boxes_per_image"] = int(sys.argv[idx + 1]) if idx + 1 < len(sys.argv) else 8
-
     if action == "train":
         run_training(model_cfg, train_cfg, data_cfg)
     elif action == "inference":
         run_inference(model_cfg, infer_cfg, data_cfg, output_dir=train_cfg.output_dir)
     elif action == "eval":
-        run_evaluation(model_cfg, train_cfg, data_cfg)
+        run_evaluation(model_cfg, train_cfg, data_cfg, infer_cfg)
     elif action == "create_sample":
         create_sample_dataset(
             output_path=data_cfg.train_data_path or "./sample_data.jsonl",
-            num_samples=extra_args.get("num_samples", 100),
-            max_boxes_per_image=extra_args.get("max_boxes_per_image", 8),
+            num_samples=args.num_samples,
+            max_boxes_per_image=args.max_boxes_per_image,
         )
     elif action == "prepare_refcoco":
         prepare_refcoco(

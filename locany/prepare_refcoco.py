@@ -14,7 +14,7 @@ from typing import Dict, List, Optional, Tuple
 
 from tqdm import tqdm
 
-from .utils import boxes_to_tokens, logger, SPECIAL_TOKENS
+from .utils import logger
 
 REPO_ID = "PaDT-MLLM/RefCOCO"
 
@@ -146,10 +146,10 @@ def convert_file(
                 if not bbox or len(bbox) < 4:
                     continue
                 x1, y1, x2, y2 = bbox[:4]
-                x1_norm = max(0, min(1000, int(x1 * 1000)))
-                y1_norm = max(0, min(1000, int(y1 * 1000)))
-                x2_norm = max(0, min(1000, int(x2 * 1000)))
-                y2_norm = max(0, min(1000, int(y2 * 1000)))
+                x1_norm = max(0, min(1000, int(round(x1 * 1000))))
+                y1_norm = max(0, min(1000, int(round(y1 * 1000))))
+                x2_norm = max(0, min(1000, int(round(x2 * 1000))))
+                y2_norm = max(0, min(1000, int(round(y2 * 1000))))
                 box_str = f"<{x1_norm}><{y1_norm}><{x2_norm}><{y2_norm}>"
                 assistant_parts.append(f"<ref>{label}</ref><box>{box_str}</box>")
 
@@ -158,11 +158,18 @@ def convert_file(
 
             assistant_text = " ".join(assistant_parts)
 
+            # Store a relative path under the COCO root to match COCO/Objects365 prep.
+            rel_img_path = img_path
+            if os.path.isabs(rel_img_path) and os.path.commonpath([coco_root, rel_img_path]) == coco_root:
+                rel_img_path = os.path.relpath(img_path, coco_root)
+
             sample = {
-                "image": img_path,
+                "image": rel_img_path,
                 "conversations": [
-                    {"from": "user", "value": f"{SPECIAL_TOKENS['image']}\n{user_text}"},
-                    {"from": "assistant", "value": assistant_text},
+                    # Match the rest of the prep scripts: human/gpt roles, and
+                    # do NOT inline the image token (parse_sharegpt_line prepends it).
+                    {"from": "human", "value": user_text},
+                    {"from": "gpt", "value": assistant_text},
                 ],
             }
             f_out.write(json.dumps(sample) + "\n")

@@ -14,7 +14,7 @@ import json
 import os
 import subprocess
 from collections import defaultdict
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 from tqdm import tqdm
 
@@ -181,10 +181,10 @@ def convert_coco_to_jsonl(
                     continue
                 cat_id = ann.get("category_id")
                 cat_name = cat_map.get(cat_id, "object")
-                x1 = int(max(0, x) * 1000 / img_w)
-                y1 = int(max(0, y) * 1000 / img_h)
-                x2 = int(min(img_w, x + w) * 1000 / img_w)
-                y2 = int(min(img_h, y + h) * 1000 / img_h)
+                x1 = int(round(max(0, x) * 1000 / img_w))
+                y1 = int(round(max(0, y) * 1000 / img_h))
+                x2 = int(round(min(img_w, x + w) * 1000 / img_w))
+                y2 = int(round(min(img_h, y + h) * 1000 / img_h))
                 x1 = min(1000, max(0, x1))
                 y1 = min(1000, max(0, y1))
                 x2 = min(1000, max(0, x2))

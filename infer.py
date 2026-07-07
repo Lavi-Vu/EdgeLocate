@@ -19,13 +19,8 @@ from locany import (
     LOCANY_SPECIAL_TOKENS,
     SPECIAL_TOKENS,
 )
+from locany.utils import setup_tokenizer
 from PIL import Image
-from transformers import AutoTokenizer
-
-
-def setup_tokenizer(model_cfg: ModelConfig):
-    from locany.utils import setup_tokenizer as _setup
-    return _setup(model_cfg)
 
 
 def main():
@@ -96,12 +91,11 @@ def main():
         conf = confs[i] if i < len(confs) else 0.0
         print(f"  [{i}] ({x1:.0f}, {y1:.0f}) -> ({x2:.0f}, {y2:.0f})  conf={conf:.3f}")
 
-    if args.output or not args.output:
-        output_path = args.output or f"output_{os.path.splitext(os.path.basename(args.image))[0]}.png"
-        label_boxes = parse_labels_and_boxes(result["text"])
-        labels = [lb[0] for lb in label_boxes]
-        vis = visualize_boxes(image.copy(), result["boxes"], labels=labels, output_path=output_path)
-        print(f"Visualization saved to {output_path}")
+    output_path = args.output or f"output_{os.path.splitext(os.path.basename(args.image))[0]}.png"
+    label_boxes = parse_labels_and_boxes(result["text"])
+    labels = [lb[0] for lb in label_boxes]
+    vis = visualize_boxes(image.copy(), result["boxes"], labels=labels, output_path=output_path)
+    print(f"Visualization saved to {output_path}")
 
 
 if __name__ == "__main__":
