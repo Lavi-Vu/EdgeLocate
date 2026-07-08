@@ -127,44 +127,64 @@ def parse_sharegpt_line(
     if image_token not in user_text:
         user_text = f"{image_token}\n{user_text}"
 
+    encoded = None
     if hasattr(tokenizer, "apply_chat_template"):
         chat_messages = [
             {"role": "user", "content": user_text},
             {"role": "assistant", "content": assistant_text},
         ]
         try:
-            full_text = tokenizer.apply_chat_template(
-                chat_messages, tokenize=False, add_generation_prompt=False
+            encoded = tokenizer.apply_chat_template(
+                chat_messages, tokenize=True, add_generation_prompt=False,
+                return_assistant_tokens_mask=True, return_dict=True,
             )
         except Exception:
-            full_text = f"<|im_start|>user\n{user_text}<|im_end|>\n<|im_start|>assistant\n{assistant_text}<|im_end|>"
+            encoded = None
+        if encoded is not None and isinstance(encoded, dict) and "input_ids" in encoded:
+            input_ids = encoded["input_ids"]
+            assistant_masks = encoded.get("assistant_masks")
+        else:
+            encoded = None
+    if encoded is None:
+        if hasattr(tokenizer, "apply_chat_template"):
+            try:
+                full_text = tokenizer.apply_chat_template(
+                    chat_messages, tokenize=False, add_generation_prompt=False,
+                )
+            except Exception:
+                full_text = f"<|im_start|>user\n{user_text}<|im_end|>\n<|im_start|>assistant\n{assistant_text}<|im_end|>"
+        else:
+            full_text = f"User: {user_text}\nAssistant: {assistant_text}"
+        enc = tokenizer(
+            full_text, max_length=max_length,
+            truncation=True, padding=False, return_tensors=None,
+        )
+        input_ids = enc["input_ids"]
+        assistant_masks = None
+
+    attention_mask = [1] * len(input_ids)
+
+    if assistant_masks is not None and any(assistant_masks):
+        labels = [tok if m else -100 for tok, m in zip(input_ids, assistant_masks)]
     else:
-        full_text = f"User: {user_text}\nAssistant: {assistant_text}"
-
-    enc = tokenizer(
-        full_text,
-        max_length=max_length,
-        truncation=True,
-        padding=False,
-        return_tensors=None,
-    )
-
-    input_ids = enc["input_ids"]
-    attention_mask = enc.get("attention_mask", [1] * len(input_ids))
-
-    # Find assistant response start for label masking
-    assistant_token_id = tokenizer.convert_tokens_to_ids("assistant")
-    assistant_start = -1
-    for i in range(len(input_ids)):
-        if input_ids[i] == assistant_token_id:
-            assistant_start = i + 1
-            break
-
-    if assistant_start < 0:
-        assistant_start = len(input_ids) // 2
-
-    labels = [-100] * len(input_ids)
-    labels[assistant_start:] = input_ids[assistant_start:]
+        # Fallback: locate the `<|im_start|>assistant\n` boundary in the
+        # tokenized sequence and label everything from that point onward.
+        # Qwen2.5's stock chat template lacks `{% generation %}` markers, so
+        # `return_assistant_tokens_mask=True` returns None and we can't rely
+        # on the tokenizer to mark the supervisor span.
+        im_start_id = tokenizer.convert_tokens_to_ids("<|im_start|>")
+        assistant_id = tokenizer.convert_tokens_to_ids("assistant")
+        newline_id = tokenizer.encode("\n", add_special_tokens=False)
+        boundary = -1
+        for i in range(len(input_ids)):
+            if input_ids[i] == im_start_id and i + 2 < len(input_ids) \
+                    and input_ids[i + 1] == assistant_id \
+                    and input_ids[i + 2:i + 2 + len(newline_id)] == newline_id:
+                boundary = i + 2 + len(newline_id)
+                break
+        if boundary < 0 or boundary >= len(input_ids):
+            return None
+        labels = [-100] * boundary + list(input_ids[boundary:])
 
     return {
         "pixel_values": image,

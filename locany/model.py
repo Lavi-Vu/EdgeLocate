@@ -12,7 +12,7 @@ from transformers import (
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from .config import ModelConfig
-from .utils import logger, SPECIAL_TOKENS
+from .utils import logger, SPECIAL_TOKENS, TEXT_MASK_TOKEN_ID
 from .generate_utils import get_token_ids_from_config, sample_tokens, handle_pattern, BOX_DECODE_FAILED
 
 DTYPE_MAP = {
@@ -365,10 +365,9 @@ class LocateAnythingForDetection(PreTrainedModel):
             return None, attention_mask, input_ids
 
         vis_feats = self.extract_visual_features(pixel_values)
-        num_image_tokens = vis_feats.shape[1] if vis_feats.dim() == 3 else 1
         if vis_feats.dim() == 2:
             vis_feats = vis_feats.unsqueeze(0)
-            num_image_tokens = vis_feats.shape[1]
+        num_image_tokens = vis_feats.shape[1] if vis_feats.dim() == 3 else 1
 
         img_positions = (input_ids == self.image_token_id).nonzero(as_tuple=False)
         batch_indices = img_positions[:, 0]
@@ -381,23 +380,27 @@ class LocateAnythingForDetection(PreTrainedModel):
         new_ids_list = []
 
         for b in range(batch_size):
-            mask = batch_indices == b
-            if mask.any():
-                img_pos = seq_indices[mask][0].item()
-                before = text_embeds[b, :img_pos]
-                after = text_embeds[b, img_pos + 1:]
-                new_embeds = torch.cat([before, vis_feats[b], after], dim=0)
+            img_pos_list = seq_indices[(batch_indices == b)].tolist()
+            if img_pos_list:
+                # Splice each image position with this batch's vis_feats, in
+                # reverse so earlier indices don't shift as we insert later.
+                tokens_for_image = torch.full(
+                    (num_image_tokens,), self.image_token_id, device=device, dtype=torch.long,
+                )
+                vis_mask = torch.ones(
+                    num_image_tokens, device=device, dtype=attention_mask.dtype,
+                )
 
-                before_ids = input_ids[b, :img_pos]
-                vis_ids = torch.full((num_image_tokens,), self.image_token_id,
-                                     device=device, dtype=torch.long)
-                after_ids = input_ids[b, img_pos + 1:]
-                new_ids = torch.cat([before_ids, vis_ids, after_ids], dim=0)
-
-                before_mask = attention_mask[b, :img_pos]
-                vis_mask = torch.ones(num_image_tokens, device=device, dtype=attention_mask.dtype)
-                after_mask = attention_mask[b, img_pos + 1:]
-                new_mask = torch.cat([before_mask, vis_mask, after_mask], dim=0)
+                emb = text_embeds[b]
+                ids = input_ids[b]
+                msk = attention_mask[b]
+                for img_pos in reversed(img_pos_list):
+                    emb = torch.cat([emb[:img_pos], vis_feats[b], emb[img_pos + 1:]], dim=0)
+                    ids = torch.cat([ids[:img_pos], tokens_for_image, ids[img_pos + 1:]], dim=0)
+                    msk = torch.cat([msk[:img_pos], vis_mask, msk[img_pos + 1:]], dim=0)
+                new_embeds = emb
+                new_ids = ids
+                new_mask = msk
             else:
                 new_embeds = text_embeds[b]
                 new_ids = input_ids[b]
@@ -429,20 +432,9 @@ class LocateAnythingForDetection(PreTrainedModel):
         return torch.stack(padded_embeds), torch.stack(padded_mask), torch.stack(padded_ids)
 
     def _expand_labels_for_visual(self, labels: torch.LongTensor, input_ids: torch.LongTensor,
-                                   n_vis_tokens: Optional[int] = None) -> torch.LongTensor:
-        if self.image_token_id is None:
+                                   n_vis_tokens: int) -> torch.LongTensor:
+        if self.image_token_id is None or n_vis_tokens is None:
             return labels
-        if n_vis_tokens is None:
-            ve = self.vision_encoder
-            ps = ve._patch_size
-            if self.is_moonvit:
-                kh, kw = ve.merge_kernel_size
-                isz = ve.image_size
-                num_vis = (isz // ps // kh) * (isz // ps // kw)
-            else:
-                num_vis = (ve.image_size // ps) ** 2
-        else:
-            num_vis = n_vis_tokens
 
         new_labels_list = []
         for b in range(labels.shape[0]):
@@ -452,7 +444,7 @@ class LocateAnythingForDetection(PreTrainedModel):
             for i in range(len(ids)):
                 new_lbl.append(lbl[i].item())
                 if ids[i] == self.image_token_id:
-                    for _ in range(num_vis - 1):
+                    for _ in range(n_vis_tokens - 1):
                         new_lbl.append(-100)
             new_labels_list.append(torch.tensor(new_lbl, device=labels.device, dtype=torch.long))
         return torch.stack(new_labels_list)
@@ -471,14 +463,16 @@ class LocateAnythingForDetection(PreTrainedModel):
 
         if labels is not None and pixel_values is not None and self.image_token_id is not None \
                 and (input_ids == self.image_token_id).any():
+            ve = self.vision_encoder
+            ps = ve._patch_size
             if self.is_moonvit:
-                ps = self.vision_encoder._patch_size
-                kh, kw = self.vision_encoder.merge_kernel_size
+                kh, kw = ve.merge_kernel_size
                 actual_h = pixel_values.shape[2] // ps // kh
                 actual_w = pixel_values.shape[3] // ps // kw
-                n_vis = actual_h * actual_w
             else:
-                n_vis = None
+                actual_h = pixel_values.shape[2] // ps
+                actual_w = pixel_values.shape[3] // ps
+            n_vis = actual_h * actual_w
             expanded_labels = self._expand_labels_for_visual(labels, input_ids, n_vis_tokens=n_vis)
         else:
             expanded_labels = labels
@@ -558,6 +552,14 @@ class LocateAnythingForDetection(PreTrainedModel):
         tok_ids = self.token_ids or get_token_ids_from_config(self.model_config)
         im_end_token_id = tok_ids['im_end_token_id']
         box_end_token_id = tok_ids['box_end_token_id']
+        # Designated mask token for PBD prediction-block placeholders. Using a
+        # dedicated token (rather than `[[0]]`) keeps the embedding at mask
+        # positions independent of the EOS-like `<|endoftext|>` row and matches
+        # the reference's `<text_mask>` semantics.
+        mask_token_ids = torch.full(
+            (1, block_size), TEXT_MASK_TOKEN_ID, dtype=torch.long, device=device,
+        )
+        mask_emb = self.llm.get_input_embeddings()(mask_token_ids)
 
         full_pos_ids = torch.arange(0, context_len + max_new_tokens + block_size, device=device).unsqueeze(0)
 
@@ -568,9 +570,6 @@ class LocateAnythingForDetection(PreTrainedModel):
         while gen_len < max_new_tokens:
             if use_mtp:
                 ctx_len = cur_embeds.shape[1]
-                mask_emb = self.llm.get_input_embeddings()(
-                    torch.tensor([[0]], device=device)
-                ).expand(-1, block_size, -1)
                 full_embeds = torch.cat([cur_embeds, mask_emb], dim=1)
                 pos_ids = full_pos_ids[:, :ctx_len + block_size].clone()
                 pos_ids[0, ctx_len:] = ctx_len - 1
@@ -696,14 +695,30 @@ def _safe_load_state_dict(model, state_dict: dict, label: str = ""):
 
 def load_model_from_dir(model_dir: str, tokenizer, model_cfg: Optional[ModelConfig] = None) -> LocateAnythingForDetection:
     import json, os, torch
+
+    saved_ve = None
+    saved_llm = None
+    cfg_path = os.path.join(model_dir, "locany_config.json")
+    if os.path.exists(cfg_path):
+        with open(cfg_path) as f:
+            cfg_dict = json.load(f)
+        saved_ve = cfg_dict.get("ve_model")
+        saved_llm = cfg_dict.get("llm_model")
+
     if model_cfg is None:
-        cfg_path = os.path.join(model_dir, "locany_config.json")
-        if os.path.exists(cfg_path):
-            with open(cfg_path) as f:
-                cfg_dict = json.load(f)
-            model_cfg = ModelConfig.from_dict(cfg_dict)
-        else:
-            model_cfg = ModelConfig()
+        model_cfg = ModelConfig.from_dict(cfg_dict) if os.path.exists(cfg_path) else ModelConfig()
+
+    if saved_ve and model_cfg.ve_model != saved_ve:
+        logger.warning(
+            f"Configured VE ({model_cfg.ve_model}) differs from the checkpoint's "
+            f"VE ({saved_ve}); non-LLM weights (vision encoder, projector, "
+            "embeddings, LM head) will not match and will be skipped."
+        )
+    if saved_llm and model_cfg.llm_model != saved_llm:
+        logger.warning(
+            f"Configured LLM ({model_cfg.llm_model}) differs from the checkpoint's "
+            f"LLM ({saved_llm}); the LoRA adapter may not apply cleanly."
+        )
 
     model_cfg.use_lora = False
     model = create_model(model_cfg)
