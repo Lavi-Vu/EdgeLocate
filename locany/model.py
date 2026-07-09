@@ -740,12 +740,12 @@ def load_model_from_dir(model_dir: str, tokenizer, model_cfg: Optional[ModelConf
     non_llm_path = os.path.join(model_dir, "non_llm.pt")
     if os.path.exists(non_llm_path):
         other_state = torch.load(non_llm_path, map_location=device)
-        fixed_state = {}
-        for k, v in other_state.items():
-            if k.startswith("llm.base_model.model."):
-                fixed_state[k.replace("llm.base_model.model.", "llm.")] = v
-            else:
-                fixed_state[k] = v
+        # The save side captured `model.state_dict()` while `model.llm` was
+        # PEFT-wrapped, so its keys are `llm.base_model.model.X`. After the
+        # `PeftModel.from_pretrained` call above, our state_dict uses the
+        # same prefix (the underlying tensors are the same Parameter
+        # objects). Pass keys through unchanged.
+        fixed_state = dict(other_state)
         _safe_load_state_dict(model, fixed_state, label=f"from {non_llm_path}")
         logger.info(f"Loaded non-LoRA weights from {non_llm_path}")
     else:
