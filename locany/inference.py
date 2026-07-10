@@ -145,8 +145,8 @@ class DetectionInferenceEngine:
         from .utils import parse_boxes_from_text
         boxes = parse_boxes_from_text(text)
         return [[
-            int(b[0] * img_w / 1000), int(b[1] * img_h / 1000),
-            int(b[2] * img_w / 1000), int(b[3] * img_h / 1000),
+            int(round(b[0] * img_w / 1000)), int(round(b[1] * img_h / 1000)),
+            int(round(b[2] * img_w / 1000)), int(round(b[3] * img_h / 1000)),
         ] for b in boxes]
 
     @torch.no_grad()
