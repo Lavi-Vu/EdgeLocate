@@ -243,7 +243,17 @@ class VisionEncoderWrapper(nn.Module):
 
 
 def create_mtp_attention_mask(context_len: int, block_size: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
-    """Create attention mask for MTP: causal on context, non-causal within the prediction block."""
+    """Create attention mask for MTP: causal on context, non-causal within the prediction block.
+
+    Matches LocateAnything (EagleVL) `_prepare_block_mask_for_inference` /
+    `update_causal_mask_for_one_gen_window_2d`:
+      - Each context row attends only to itself + earlier context (causal).
+      - Each block row (the last ``block_size`` rows) attends to ALL context and
+        to ALL other block rows (bidirectional within the block).
+      - Block rows cannot attend to the column immediately before the block — that
+        is the original "anchor" context column whose information is already
+        re-fed at block position 0 via the anchor replay.
+    """
     total_len = context_len + block_size
     mask = torch.full((1, 1, total_len, total_len), float('-inf'), device=device, dtype=dtype)
     for i in range(total_len):
@@ -252,6 +262,10 @@ def create_mtp_attention_mask(context_len: int, block_size: int, device: torch.d
         else:
             mask[0, 0, i, :context_len] = 0.0
             mask[0, 0, i, context_len:] = 0.0
+    if context_len > 0:
+        # Block the column immediately before the block (already represented via
+        # the anchor replay at block position 0).
+        mask[0, 0, context_len:total_len, context_len - 1] = float('-inf')
     return mask
 
 
@@ -556,8 +570,14 @@ class LocateAnythingForDetection(PreTrainedModel):
         # dedicated token (rather than `[[0]]`) keeps the embedding at mask
         # positions independent of the EOS-like `<|endoftext|>` row and matches
         # the reference's `<text_mask>` semantics.
+        # PBD block mirrors the reference `_prepare_inputs_in_mtp`: one anchor
+        # token (the last context token replayed) sits at block position 0, with
+        # `block_size - 1` mask placeholders following. The anchor re-establishes
+        # the last token inside the block so the mask positions can attend to it
+        # (its cached original is blocked by `create_mtp_attention_mask`).
+        n_mask = block_size - 1
         mask_token_ids = torch.full(
-            (1, block_size), TEXT_MASK_TOKEN_ID, dtype=torch.long, device=device,
+            (1, n_mask), TEXT_MASK_TOKEN_ID, dtype=torch.long, device=device,
         )
         mask_emb = self.llm.get_input_embeddings()(mask_token_ids)
 
@@ -570,9 +590,18 @@ class LocateAnythingForDetection(PreTrainedModel):
         while gen_len < max_new_tokens:
             if use_mtp:
                 ctx_len = cur_embeds.shape[1]
-                full_embeds = torch.cat([cur_embeds, mask_emb], dim=1)
+                anchor_emb = cur_embeds[:, -1:, :]
+                block_embeds = torch.cat([anchor_emb, mask_emb], dim=1)
+                full_embeds = torch.cat([cur_embeds, block_embeds], dim=1)
                 pos_ids = full_pos_ids[:, :ctx_len + block_size].clone()
-                pos_ids[0, ctx_len:] = ctx_len - 1
+                # Anchor keeps the last context position (ctx_len - 1); each
+                # following mask slot gets an increasing position so RoPE places
+                # the block's six logits at positions
+                # [ctx_len, ctx_len+1, ..., ctx_len+5] = six distinct new tokens.
+                block_pos = [ctx_len - 1] + list(range(ctx_len, ctx_len + n_mask))
+                pos_ids[0, ctx_len:ctx_len + block_size] = torch.tensor(
+                    block_pos, dtype=torch.long, device=device,
+                )
                 attn_mask = create_mtp_attention_mask(ctx_len, block_size, device, cur_embeds.dtype)
 
                 with torch.no_grad():
@@ -611,12 +640,14 @@ class LocateAnythingForDetection(PreTrainedModel):
                     p = probs[0, j, t_id].item()
                     all_confs.append(p)
             else:
+                # No KV cache: re-feed the full sequence so HF infers seq_len
+                # from cur_embeds and the 2D attention_mask agree. logits at the
+                # last position predict the next token (standard no-cache AR).
                 ctx_len = cur_embeds.shape[1]
-                last_emb = cur_embeds[:, -1:, :]
-                pos_ids = full_pos_ids[:, ctx_len - 1:ctx_len]
+                pos_ids = full_pos_ids[:, :ctx_len]
                 with torch.no_grad():
                     outputs = self.llm(
-                        inputs_embeds=last_emb, attention_mask=cur_mask,
+                        inputs_embeds=cur_embeds, attention_mask=cur_mask,
                         position_ids=pos_ids, use_cache=False, return_dict=True,
                     )
 
