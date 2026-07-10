@@ -142,6 +142,13 @@ def is_valid_box_frame(probs, token_ids, start_thresh=0.6, end_thresh=0.2, topk=
 
 
 def decode_bbox_avg(logits, probs, token_ids, keep_k=5, start_thresh=0.7, end_thresh=0.2, generation_mode='hybrid'):
+    """Decode a 6-token box frame as top-1 argmax over the coordinate-token range.
+
+    No top-k weighted averaging: each of the 4 coordinate slots takes the single
+    highest-probability coordinate token directly. Frame validity is still gated
+    by :func:`is_valid_box_frame` (start/end thresholds); an illegal frame
+    returns ``None`` so the caller falls back to the raw argmax (``x0``).
+    """
     coord_start_token_id = token_ids['coord_start_token_id']
     coord_end_token_id = token_ids['coord_end_token_id']
     box_start_token_id = token_ids['box_start_token_id']
@@ -158,27 +165,8 @@ def decode_bbox_avg(logits, probs, token_ids, keep_k=5, start_thresh=0.7, end_th
     elif box_type == 'illegal_box':
         return None
 
-    pos_probs, pos_ids = torch.topk(probs[1:5], k=keep_k, dim=-1)
-    mask = (pos_ids >= coord_start_token_id) & (pos_ids <= coord_end_token_id)
-    has_valid = mask.any(dim=-1)
-    if not has_valid.all():
-        return None
-
-    first_valid_idx = mask.long().argmax(dim=-1, keepdim=True)
-    first_valid_probs = pos_probs.gather(-1, first_valid_idx).squeeze(-1)
-    first_valid_ids = pos_ids.gather(-1, first_valid_idx).squeeze(-1)
-
-    if generation_mode == 'hybrid':
-        valid_counts = mask.sum(dim=-1)
-        LARGE_NUM, SMALL_NUM = 999999, -999999
-        valid_ids_for_max = torch.where(mask, pos_ids, torch.tensor(SMALL_NUM, device=device))
-        valid_ids_for_min = torch.where(mask, pos_ids, torch.tensor(LARGE_NUM, device=device))
-        valid_max = valid_ids_for_max.max(dim=-1)[0]
-        valid_min = valid_ids_for_min.min(dim=-1)[0]
-        is_abnormal = (first_valid_probs < 0.9) & (valid_counts > 1) & ((valid_max - valid_min) > 60)
-        final_coords = torch.where(is_abnormal, torch.tensor(0, device=device), first_valid_ids)
-    else:
-        final_coords = first_valid_ids
+    coord_probs = probs[1:5, coord_start_token_id:coord_end_token_id + 1]
+    final_coords = coord_probs.argmax(dim=-1) + coord_start_token_id
 
     start_t = torch.tensor([box_start_token_id], dtype=final_coords.dtype, device=device)
     end_t = torch.tensor([box_end_token_id], dtype=final_coords.dtype, device=device)
