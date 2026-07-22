@@ -106,11 +106,11 @@ These become vocabulary tokens `<d1>`, `<d2>`, `<d3>`, `<d4>` (IDs 151670–1526
 During inference and evaluation, the reverse:
 
 ```
-x1_pixel = int(x1_token * img_width / 1000)
-y1_pixel = int(y1_token * img_height / 1000)
+x1_pixel = int(round(x1_token * img_width / 1000))
+y1_pixel = int(round(y1_token * img_height / 1000))
 ```
 
-Both GT and predictions are denormalized to original image pixel space before metric computation.
+Predictions (`inference._parse_boxes`) round to the nearest pixel so the decode parity matches the **rounded** training-side `boxes_to_tokens`. GT (`eval._denorm_boxes`) keeps the float `x1_token * img_width / 1000` (no rounding) so metric computation has full sub-pixel fidelity. Both GT and predictions are denormalized to original image pixel space before metric computation.
 
 ### Token scheme
 
@@ -235,7 +235,7 @@ sample_tokens(logits, ...)
   └── decode_bbox_avg() for coord positions
         │
         ▼
-6 decoded tokens: [<box>, d1_avg, d2_avg, d3_avg, d4_avg, </box>]
+6 decoded tokens: [<box>, d1, d2, d3, d4, </box>]
         │
         ▼
 handle_pattern(tokens)
@@ -261,17 +261,15 @@ append tokens to generated sequence, repeat
 
 For each coordinate position in the block:
 
-1. Take the top-k (`keep_k_avg=4`) token logits within the coordinate token range `[COORD_START, COORD_START+1000]`
-2. Compute softmax over those top-k logits
-3. Weighted average of the coordinate values:
+1. Gate the frame with `is_valid_box_frame()` (start/end-token probability thresholds). An illegal frame returns `None` and the caller falls back to the raw argmax (`x0`) → `handle_pattern` may route the residual to AR on `error_box`.
+2. For the 4 coordinate slots (positions 1–4), take `argmax` directly over the coordinate-token range `[COORD_START, COORD_START+1000]`:
    ```
-   avg_coord = sum(softmax_score_i * coord_value_i) / sum(scores)
+   coord_probs = probs[1:5, COORD_START:COORD_END+1]
+   final_coords = coord_probs.argmax(dim=-1) + COORD_START
    ```
-4. Round to nearest integer in `[0, 1000]`
-5. In `hybrid` mode: only average if the top-1 probability is low AND the spread across candidates is wide
-6. In `fast` mode: always average
+3. Wrap with `<box>` / `</box>` → `[box_start, x1, y1, x2, y2, box_end]`.
 
-This produces smoother box coordinates than naive top-1 argmax.
+Each coordinate is decoded as the single highest-probability coordinate token (pure top-1 argmax over the coord-token subspace — no top-k weighted averaging or spread heuristic). `keep_k_avg` still flows to `is_valid_box_frame` for the frame-validity thresholds but is no longer used to blend candidates.
 
 ### `handle_pattern()` classification
 
@@ -346,14 +344,19 @@ r"<(\d+)><(\d+)><(\d+)><(\d+)></box>"
 Returns `List[List[float]]` with 4-element boxes `[x1, y1, x2, y2]` in 0-1000 token space.
 
 ### Coordinate denormalization
-Both GT and prediction boxes are converted from token space to pixel space per-image:
+GT and prediction boxes are both converted from token space to pixel space per-image, with slightly different rounding so the model's trained (rounded) parity isn't double-counted against the metric:
 
 ```
-x1_pixel = x1_token * img_width / 1000
-y1_pixel = y1_token * img_height / 1000
+# Inference predictions — int(round(...)) to match training boxes_to_tokens
+x1_pixel = int(round(x1_token * img_width / 1000))
+y1_pixel = int(round(y1_token * img_height / 1000))
+
+# Evaluation GT — kept as float for sub-pixel metric fidelity
+x1_pixel = x1_token * img_width / 1000.0
+y1_pixel = y1_token * img_height / 1000.0
 ```
 
-This is done in `eval.py` via `_denorm_boxes()` and within `inference.py`'s `_parse_boxes()` method.
+Predictions are denormalized in `inference.py`'s `_parse_boxes()`; GT in `eval.py`'s `_denorm_boxes()`.
 
 ### Metrics
 Standard COCO evaluation computed in `eval.py`:

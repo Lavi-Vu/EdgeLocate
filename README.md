@@ -100,7 +100,6 @@ Recipe fields:
 ```bash
 python train.py --action train \
   --ve_model <path-to-MoonViT-SO-400M> \
-  --ve_hidden_size 1152 \
   --train_data_path ./data.jsonl \
   --image_dir . \
   --output_dir ./outputs_moonvit \
@@ -127,16 +126,28 @@ python train.py --action train \
   --bf16
 ```
 
-### Sequence packing
-Reduce padding waste by concatenating multiple samples into one sequence:
+### Full fine-tuning (no LoRA)
+Train every weight of the LLM (and untied LM head + projector) instead of injecting LoRA adapters. Vision encoder stays frozen by default — add `--no-freeze_vision_encoder` to fine-tune it too. The untied LM head trains independently (`tie_word_embeddings=False` when LoRA is off).
 ```bash
 python train.py --action train \
-  --packing \
-  --max_length 2048 \
-  --train_data_path ./data.jsonl
+  --no-lora \
+  --train_data_path ./data/coco_detection/train.jsonl \
+  --image_dir ./data/coco/train2017 \
+  --output_dir ./outputs_fullft \
+  --per_device_batch_size 1 --gradient_accumulation_steps 16 \
+  --gradient_checkpointing --bf16
 ```
 
-Each sample gets its own `position_ids` starting from 0; the model creates per-sample causal boundaries via `sub_sample_lengths`.
+Differences from LoRA training:
+
+| | LoRA (default) | `--no-lora` |
+|---|---|---|
+| Trainable | ~37–44M (LoRA + projector + LM head/embed) | ~600M+ (full LLM + projector + LM head/embed) |
+| `tie_word_embeddings` | forced True (head shares embedding) | False (untied LM head trains independently) |
+| Save | LoRA adapter + `non_llm.pt` | full `model.safetensors` via `model.save_pretrained()` |
+| Load | adapter_config.json + non_llm.pt | `model.safetensors` |
+
+Full FT of Qwen2.5-0.5B needs ~16–24 GB VRAM (Adam fp32 states dominate). If OOM: keep `--gradient_checkpointing`, raise `--gradient_accumulation_steps` to preserve the effective batch, and consider 8-bit Adam (`optim="adamw_8bit"` in `training.py`'s `TrainingArguments`). VE adaptation without full VE FT is available via `--use_backbone_lora N`.
 
 ## Evaluation
 
@@ -274,8 +285,6 @@ Total vocabulary: 152673 tokens (base Qwen2.5 + 1001 coord + 8 special).
 |---|---|---|
 | `--llm_model` | `Qwen/Qwen2.5-0.5B-Instruct` | LLM backbone |
 | `--ve_model` | `google/siglip-base-patch16-224` | Vision encoder |
-| `--ve_hidden_size` | `768` | VE output dim (1152 for MoonViT) |
-| `--llm_hidden_size` | `896` | LLM hidden dim |
 | `--max_boxes` | `32` | Max boxes per image |
 | `--freeze_llm` | `False` | Freeze entire LLM |
 | `--freeze_vision_encoder` | `True` | Freeze VE weights |
@@ -311,7 +320,6 @@ Total vocabulary: 152673 tokens (base Qwen2.5 + 1001 coord + 8 special).
 | `--save_total_limit` | `3` | Max checkpoints to keep |
 | `--lr_scheduler_type` | `cosine` | LR schedule |
 | `--max_grad_norm` | `1.0` | Gradient clipping |
-| `--packing` | `False` | Enable sequence packing |
 | `--seed` | `42` | Random seed |
 
 ### Data
@@ -333,7 +341,7 @@ Total vocabulary: 152673 tokens (base Qwen2.5 + 1001 coord + 8 special).
 | `--max_new_boxes` | `32` | Max boxes to decode |
 | `--temperature` | `0.0` | Sampling temperature (0 = greedy) |
 | `--top_p` | `1.0` | Nucleus sampling |
-| `--keep_k_avg` | `4` | PBD coordinate averaging candidates |
+| `--keep_k_avg` | `4` | PBD frame-validity topk (coordinate averaging removed; argmax decode) |
 | `--confidence_threshold` | `0.0` | Min confidence (reserved) |
 | `--batch_size` | `8` | Eval batch size (predict_batch) |
 | `--max_samples` | `None` | Limit eval samples |
