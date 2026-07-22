@@ -25,7 +25,7 @@ Default base: **Qwen2.5-0.5B-Instruct** + **SigLIP-Base-Patch16-224** + 2-layer 
 
 ## How It Works
 
-1. **Tokenization**: 1001 discrete coordinate tokens `<0>`–`<1000>` (IDs 151668–152668) plus `<box>` (151666), `</box>` (151667), `<ref>` (151669), and `</ref>` (151670) are added to the vocabulary
+1. **Tokenization**: 1001 discrete coordinate tokens `<0>`–`<1000>` plus `<|image|>`, `<box>`, `</box>`, `<ref>`, `</ref>` are added to the vocabulary
 2. **Training**: Standard autoregressive next-token prediction. The GPT response contains `<ref>label</ref><box><d1><d2><d3><d4></box>` sequences where each `<d>` is a quantized coordinate in [0, 1000]
 3. **Generation**: Standard `llm.generate()` with `inputs_embeds` (visual features replace the `<|image|>` token position). The model auto-regressively produces coordinate tokens.
 4. **Box parsing**: Regex extracts `<ref>label</ref><box><(\d+)><(\d+)><(\d+)><(\d+)></box>` patterns from generated text, with fallbacks for malformed output.

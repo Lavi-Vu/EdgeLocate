@@ -148,14 +148,15 @@ x1 y1 x2 y2"]
 
 ### Vocabulary
 
-| Token | ID | Count |
-|---|---|---|
-| Base Qwen vocab | 0–151643 | 151644 |
-| `<|image|>` | 151665 | 1 |
-| `<box>` | 151666 | 1 |
-| `</box>` | 151667 | 1 |
-| `<0>` – `<1000>` | 151668–152668 | 1001 |
-| **Total** | | **152669** |
+| Token | Notes |
+|---|---|
+| Base Qwen vocab | Standard Qwen2.5 tokens |
+| `<\|image\|>` | Image placeholder token |
+| `<box>` | Bounding box start |
+| `</box>` | Bounding box end |
+| `<ref>` | Reference/label start |
+| `</ref>` | Reference/label end |
+| `<0>` – `<1000>` | 1001 discrete coordinate tokens |
 
 Coordinate tokens `<n>` map to integer bin `n` in range [0, 1000], representing the normalized coordinate `n / 1000`.
 

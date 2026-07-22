@@ -153,9 +153,10 @@ def parse_sharegpt_line(
     attention_mask = enc.get("attention_mask", [1] * len(input_ids))
 
     # Find assistant response start for label masking
+    # Look for the LAST occurrence of "assistant" token to handle system prompts
     assistant_token_id = tokenizer.convert_tokens_to_ids("assistant")
     assistant_start = -1
-    for i in range(len(input_ids)):
+    for i in range(len(input_ids) - 1, -1, -1):
         if input_ids[i] == assistant_token_id:
             assistant_start = i + 1
             break

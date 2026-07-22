@@ -18,28 +18,17 @@ SPECIAL_TOKENS = {
     "image": "<|image|>",
     "box_start": "<box>",
     "box_end": "</box>",
+    "ref_start": "<ref>",
+    "ref_end": "</ref>",
 }
 
 COORD_TOKENS = [f"<{i}>" for i in range(1001)]
 
 LOCANY_SPECIAL_TOKENS = list(SPECIAL_TOKENS.values()) + COORD_TOKENS
 
-COORD_START_ID = 151668
-BOX_START_TOKEN_ID = 151666
-BOX_END_TOKEN_ID = 151667
-IMAGE_TOKEN_ID = 151665
-
 
 def coord_to_token(coord: int) -> str:
     return f"<{coord}>"
-
-
-def coord_to_token_id(coord: int) -> int:
-    return COORD_START_ID + coord
-
-
-def token_id_to_coord(token_id: int) -> int:
-    return token_id - COORD_START_ID
 
 
 def boxes_to_tokens(boxes: List[List[float]], img_size: int = 224) -> str:

@@ -143,17 +143,15 @@ class VisionEncoderWrapper(nn.Module):
                 w = pixel_values.shape[3] // ps
                 grid_hws = torch.tensor([[h, w]] * B, device=pixel_values.device, dtype=torch.long)
                 outputs = self.encoder(pixel_values, grid_hws)
+                # MoonViT with patched forward returns (B, num_patches, D) or (B*num_patches, D)
                 if isinstance(outputs, (list, tuple)):
-                    feats_list = []
-                    for out in outputs:
-                        if out.dim() == 3 and out.shape[-2] > 1:
-                            N, K, D = out.shape
-                            feats_list.append(out.view(N * K, D))
-                        else:
-                            feats_list.append(out)
-                    feat = torch.stack(feats_list)
+                    # Take the last hidden state if list is returned
+                    feat = outputs[-1] if outputs else None
                 else:
                     feat = outputs
+                # Ensure shape is (B, num_patches, D) for projector
+                if feat.dim() == 2:
+                    feat = feat.unsqueeze(0)
                 return feat
             else:
                 outputs = self.encoder(pixel_values, output_hidden_states=True)
@@ -343,22 +341,17 @@ class LocateAnythingForDetection(PreTrainedModel):
         self,
         labels: torch.LongTensor,
         input_ids: torch.LongTensor,
+        num_visual_tokens: int,
     ) -> torch.LongTensor:
-        """Expand labels to match merged sequence length by inserting -100 for visual tokens."""
+        """Expand labels to match merged sequence length by inserting -100 for visual tokens.
+        
+        Args:
+            labels: Original labels tensor (B, seq_len)
+            input_ids: Original input_ids tensor (B, seq_len)
+            num_visual_tokens: Actual number of visual tokens from the vision encoder output
+        """
         if self.image_token_id is None:
             return labels
-        ve = self.vision_encoder
-        ps = getattr(ve.encoder.config, "patch_size", 16)
-        isz = ve.image_size
-
-        if "moonvit" in ve.model_name.lower():
-            num_vis = (isz // ps) ** 2
-        else:
-            num_patches = (isz // ps) ** 2
-            num_cls = getattr(ve.encoder.config, "num_cls_tokens", 0)
-            if "siglip" in ve.model_name.lower():
-                num_cls = 0
-            num_vis = num_patches + num_cls
 
         new_labels_list = []
         for b in range(labels.shape[0]):
@@ -368,7 +361,7 @@ class LocateAnythingForDetection(PreTrainedModel):
             for i in range(len(ids)):
                 new_lbl.append(lbl[i].item())
                 if ids[i] == self.image_token_id:
-                    for _ in range(num_vis - 1):
+                    for _ in range(num_visual_tokens - 1):
                         new_lbl.append(-100)
             new_labels_list.append(torch.tensor(new_lbl, device=labels.device, dtype=torch.long))
         return torch.stack(new_labels_list)
@@ -386,10 +379,13 @@ class LocateAnythingForDetection(PreTrainedModel):
         return_dict = return_dict if return_dict is not None else True
         output_hidden_states = output_hidden_states if output_hidden_states is not None else False
 
+        num_visual_tokens = 0
         if pixel_values is not None and input_ids is not None and self.image_token_id is not None:
             merged_embeds, merged_mask, merged_ids = self.merge_visual_features(
                 pixel_values, input_ids, attention_mask,
             )
+            if merged_embeds is not None:
+                num_visual_tokens = merged_embeds.shape[1] - (input_ids.shape[1] - 1)
             if merged_embeds is None:
                 merged_embeds = None
                 merged_mask = attention_mask
@@ -400,7 +396,7 @@ class LocateAnythingForDetection(PreTrainedModel):
             merged_ids = input_ids
 
         if labels is not None and pixel_values is not None and self.image_token_id is not None and (input_ids == self.image_token_id).any():
-            expanded_labels = self._expand_labels_for_visual(labels, input_ids)
+            expanded_labels = self._expand_labels_for_visual(labels, input_ids, num_visual_tokens)
         else:
             expanded_labels = labels
 
