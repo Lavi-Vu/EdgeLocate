@@ -23,11 +23,16 @@ DTYPE_MAP = {
 
 
 class MLPProjector(nn.Module):
-    """2-layer MLP projector from vision encoder space to LLM space."""
+    """3-layer MLP projector with LayerNorm, matching reference LocateAnything3B architecture.
+    
+    Reference uses: LayerNorm(vit_hidden*4) -> Linear(vit_hidden*4, llm_hidden) -> GELU -> Linear(llm_hidden, llm_hidden)
+    For non-MoonViT encoders (no pixel_shuffle), we use: LayerNorm(vit_hidden) -> Linear(vit_hidden, llm_hidden) -> GELU -> Linear(llm_hidden, llm_hidden)
+    """
 
     def __init__(self, ve_hidden_size: int, llm_hidden_size: int):
         super().__init__()
         self.model = nn.Sequential(
+            nn.LayerNorm(ve_hidden_size),
             nn.Linear(ve_hidden_size, llm_hidden_size),
             nn.GELU(),
             nn.Linear(llm_hidden_size, llm_hidden_size),

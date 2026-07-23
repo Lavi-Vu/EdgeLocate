@@ -101,18 +101,27 @@ def parse_sharegpt_line(
 
     try:
         use_size = image_size
-        # Data augmentation: random scale crop for robustness
         if data_augment:
             import random as _r
-            scale = _r.uniform(0.8, 1.0)
-            ih = int(image_size[0] * scale)
-            iw = int(image_size[1] * scale)
-            image = load_image(resolved, size=(ih, iw))
             from torchvision import transforms as T
-            image = T.Compose([
-                T.Resize(image_size),
-                T.RandomCrop(image_size),
-            ])(image)
+            if _r.random() < 0.5:
+                image = load_image(resolved, size=image_size)
+            else:
+                long_edge = _r.randint(
+                    max(image_size) // 2,
+                    max(image_size) * 2,
+                )
+                img = Image.open(resolved).convert("RGB")
+                w, h = img.size
+                scale = long_edge / max(w, h)
+                new_w, new_h = int(w * scale), int(h * scale)
+                img = img.resize((new_w, new_h), Image.LANCZOS)
+                image = T.Compose([
+                    T.Resize(image_size, interpolation=T.InterpolationMode.LANCZOS),
+                    T.CenterCrop(image_size),
+                ])(img)
+            if _r.random() < 0.5:
+                image = T.functional.hflip(image)
         else:
             image = load_image(resolved, size=image_size)
     except Exception as e:

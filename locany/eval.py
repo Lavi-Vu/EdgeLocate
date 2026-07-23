@@ -136,11 +136,94 @@ def compute_coco_ap(
     return results
 
 
+def compute_category_ap(
+    pred_labels_boxes: Dict[int, List[Tuple[str, List[float]]]],
+    gt_labels_boxes: Dict[int, List[Tuple[str, List[float]]]],
+    iou_threshold: float = 0.5,
+) -> Dict[str, Dict[str, float]]:
+    """Compute per-category AP using IoU matching.
+    
+    Args:
+        pred_labels_boxes: {image_id: [(label, [x1,y1,x2,y2]), ...]}
+        gt_labels_boxes: {image_id: [(label, [x1,y1,x2,y2]), ...]}
+    
+    Returns:
+        {category: {"AP": float, "precision": float, "recall": float, "support": int}}
+    """
+    categories = set()
+    for img_id, items in gt_labels_boxes.items():
+        for label, _ in items:
+            categories.add(label)
+    for img_id, items in pred_labels_boxes.items():
+        for label, _ in items:
+            categories.add(label)
+
+    results = {}
+    for cat in sorted(categories):
+        cat_pred_by_image = {}
+        cat_gt_by_image = {}
+        for img_id in gt_labels_boxes:
+            cat_gts = [(l, b) for l, b in gt_labels_boxes[img_id] if l == cat]
+            if cat_gts:
+                cat_gt_by_image[img_id] = cat_gts
+            cat_preds = [(l, b) for l, b in pred_labels_boxes.get(img_id, []) if l == cat]
+            if cat_preds:
+                cat_pred_by_image[img_id] = cat_preds
+
+        pred_boxes_flat = {img_id: [b for _, b in preds] for img_id, preds in cat_pred_by_image.items()}
+        gt_boxes_flat = {img_id: [b for _, b in gts] for img_id, gts in cat_gt_by_image.items()}
+
+        n_gt = sum(len(gts) for gts in cat_gt_by_image.values())
+        ap = compute_ap(pred_boxes_flat, gt_boxes_flat, iou_threshold)
+
+        precs, recs = [], []
+        for img_id in cat_gt_by_image:
+            preds = [b for _, b in cat_pred_by_image.get(img_id, [])]
+            gts = [b for _, b in cat_gt_by_image[img_id]]
+            p, r, _ = compute_precision_recall(preds, gts, iou_threshold)
+            precs.append(p)
+            recs.append(r)
+
+        results[cat] = {
+            "AP": ap,
+            "precision": float(np.mean(precs)) if precs else 0.0,
+            "recall": float(np.mean(recs)) if recs else 0.0,
+            "support": n_gt,
+        }
+    return results
+
+
 def _resolve_image_path(image_path: str, image_dir: str) -> Optional[str]:
     resolved = image_path if os.path.isabs(image_path) else os.path.join(image_dir, image_path)
     if not os.path.exists(resolved):
         resolved = os.path.join(image_dir, os.path.basename(image_path))
     return resolved if os.path.exists(resolved) else None
+
+
+def _extract_human_prompt(raw: dict) -> str:
+    """Extract the human/user prompt from a raw data dict."""
+    if "conversations" in raw:
+        for conv in raw["conversations"]:
+            if conv.get("from") in ("human", "user"):
+                return conv["value"]
+    if "messages" in raw:
+        for msg in raw["messages"]:
+            if msg.get("role") == "user":
+                return msg.get("content", "")
+    return ""
+
+
+def _extract_gt_text(raw: dict) -> Optional[str]:
+    """Extract the assistant/GPT response from a raw data dict."""
+    if "conversations" in raw:
+        for conv in raw["conversations"]:
+            if conv.get("from") in ("gpt", "assistant"):
+                return conv["value"]
+    if "messages" in raw:
+        for msg in raw["messages"]:
+            if msg.get("role") == "assistant":
+                return msg.get("content", "")
+    return None
 
 
 def run_benchmark(
@@ -154,13 +237,15 @@ def run_benchmark(
 ) -> Dict[str, float]:
     from .config import InferenceConfig
     from .inference import DetectionInferenceEngine
-    from .utils import parse_boxes_from_text
+    from .utils import parse_boxes_from_text, parse_labels_and_boxes
 
     inf_cfg = InferenceConfig(max_new_tokens=512)
     engine = DetectionInferenceEngine(model, tokenizer, inf_cfg)
 
     pred_boxes_by_image = {}
     gt_boxes_by_image = {}
+    pred_labels_boxes_by_image = {}
+    gt_labels_boxes_by_image = {}
     all_ious = []
     all_precisions = []
     all_recalls = []
@@ -172,15 +257,11 @@ def run_benchmark(
         if max_samples and i >= max_samples:
             break
         raw = dataset._raw_data[i]
-        image_path = raw.get("image", "")
+        image_path = raw.get("image", "") or raw.get("image_path", "")
         resolved = _resolve_image_path(image_path, image_dir)
         if resolved is None:
             continue
-        gt_text = None
-        for conv in raw.get("conversations", []):
-            if conv.get("from") in ("gpt", "assistant"):
-                gt_text = conv["value"]
-                break
+        gt_text = _extract_gt_text(raw)
         if gt_text and parse_boxes_from_text(gt_text):
             valid_indices.append(i)
 
@@ -196,33 +277,30 @@ def run_benchmark(
 
         batch_images = []
         batch_gt_boxes = []
+        batch_gt_labels_boxes = []
+        batch_prompts = []
         batch_ids = []
 
         for idx in batch_indices:
             raw = dataset._raw_data[idx]
-            resolved = _resolve_image_path(raw["image"], image_dir)
+            image_path = raw.get("image", "") or raw.get("image_path", "")
+            resolved = _resolve_image_path(image_path, image_dir)
             image = Image.open(resolved).convert("RGB")
             batch_images.append(image)
             batch_ids.append(idx)
 
-            gt_text = None
-            for conv in raw.get("conversations", []):
-                if conv.get("from") in ("gpt", "assistant"):
-                    gt_text = conv["value"]
-                    break
+            gt_text = _extract_gt_text(raw)
             gt_boxes = parse_boxes_from_text(gt_text or "")
             batch_gt_boxes.append(gt_boxes)
+            gt_labeled = parse_labels_and_boxes(gt_text or "")
+            batch_gt_labels_boxes.append(gt_labeled)
 
-        human_text = ""
-        raw0 = dataset._raw_data[valid_indices[0]]
-        for conv in raw0.get("conversations", []):
-            if conv.get("from") in ("human", "user"):
-                human_text = conv["value"]
-                break
-        prompt = _make_prompt(human_text)
+            human_text = _extract_human_prompt(raw)
+            prompt = _make_prompt(human_text)
+            batch_prompts.append(prompt)
 
         batch_results = engine.predict_batch(
-            batch_images, [prompt] * len(batch_images), batch_size=len(batch_images)
+            batch_images, [batch_prompts[0]] * len(batch_images), batch_size=len(batch_images)
         )
 
         for j, result in enumerate(batch_results):
@@ -232,6 +310,23 @@ def run_benchmark(
 
             pred_boxes_by_image[img_id] = pred_boxes
             gt_boxes_by_image[img_id] = gt_boxes
+
+            pred_labeled = parse_labels_and_boxes(result.get("text", ""))
+            pred_labels_boxes_by_image[img_id] = [(l, [
+                int(b[0] * batch_images[j].width / 1000),
+                int(b[1] * batch_images[j].height / 1000),
+                int(b[2] * batch_images[j].width / 1000),
+                int(b[3] * batch_images[j].height / 1000),
+            ]) for l, b in pred_labeled]
+
+            orig_w, orig_h = batch_images[j].size
+            gt_labeled_scaled = [(l, [
+                b[0] * orig_w / 1000,
+                b[1] * orig_h / 1000,
+                b[2] * orig_w / 1000,
+                b[3] * orig_h / 1000,
+            ]) for l, b in batch_gt_labels_boxes[j]]
+            gt_labels_boxes_by_image[img_id] = gt_labeled_scaled
 
             if pred_boxes and gt_boxes:
                 box_ious = [compute_iou(p, g) for p in pred_boxes for g in gt_boxes]
@@ -255,6 +350,15 @@ def run_benchmark(
 
     coco_aps = compute_coco_ap(pred_boxes_by_image, gt_boxes_by_image)
     results.update(coco_aps)
+
+    cat_aps = compute_category_ap(pred_labels_boxes_by_image, gt_labels_boxes_by_image)
+    if cat_aps:
+        cat_ap_vals = [v["AP"] for v in cat_aps.values()]
+        results["mAP_per_category"] = float(np.mean(cat_ap_vals))
+        results["per_category"] = {
+            cat: {"AP": v["AP"], "support": v["support"]}
+            for cat, v in sorted(cat_aps.items(), key=lambda x: -x[1]["AP"])
+        }
 
     return results
 
