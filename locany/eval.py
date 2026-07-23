@@ -171,7 +171,7 @@ def run_benchmark(
     for i in range(len(dataset)):
         if max_samples and i >= max_samples:
             break
-        raw = dataset.data[i]
+        raw = dataset._raw_data[i]
         image_path = raw.get("image", "")
         resolved = _resolve_image_path(image_path, image_dir)
         if resolved is None:
@@ -199,7 +199,7 @@ def run_benchmark(
         batch_ids = []
 
         for idx in batch_indices:
-            raw = dataset.data[idx]
+            raw = dataset._raw_data[idx]
             resolved = _resolve_image_path(raw["image"], image_dir)
             image = Image.open(resolved).convert("RGB")
             batch_images.append(image)
@@ -214,7 +214,7 @@ def run_benchmark(
             batch_gt_boxes.append(gt_boxes)
 
         human_text = ""
-        raw0 = dataset.data[valid_indices[0]]
+        raw0 = dataset._raw_data[valid_indices[0]]
         for conv in raw0.get("conversations", []):
             if conv.get("from") in ("human", "user"):
                 human_text = conv["value"]

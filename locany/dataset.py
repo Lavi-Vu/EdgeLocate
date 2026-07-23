@@ -243,6 +243,7 @@ class DetectionDataset(Dataset):
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.image_size = image_size
+        self._raw_data = []
 
         datasets = []
 
@@ -264,6 +265,7 @@ class DetectionDataset(Dataset):
                             lines.append(json.loads(line))
                 logger.info(f"Recipe '{name}': {len(lines)} samples, root={root}, "
                             f"repeat={repeat}, augment={augment}")
+                self._raw_data.extend(lines)
                 sub = _SubDataset(lines, root, tokenizer, max_length, image_size, augment)
                 if repeat > 1:
                     datasets.append(ConcatDataset([sub] * int(repeat)))
@@ -279,6 +281,7 @@ class DetectionDataset(Dataset):
                     if line:
                         lines.append(json.loads(line))
             logger.info(f"Loaded {len(lines)} samples from {data_path} (legacy path)")
+            self._raw_data.extend(lines)
             sub = _SubDataset(lines, image_dir, tokenizer, max_length, image_size, False)
             datasets.append(sub)
         elif data_path and not data_recipe:
