@@ -5,6 +5,7 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
+from PIL import Image, ImageDraw, ImageFont
 from tqdm import tqdm
 
 
@@ -193,6 +194,86 @@ def compute_category_ap(
     return results
 
 
+def visualize_eval_result(
+    image: Image.Image,
+    gt_boxes: List[List[float]],
+    pred_boxes: List[List[float]],
+    gt_labels: Optional[List[str]] = None,
+    pred_labels: Optional[List[str]] = None,
+    prompt: str = "",
+    output_path: Optional[str] = None,
+) -> Image.Image:
+    """Draw GT boxes (green) and predicted boxes (red) side-by-side on the image.
+    
+    GT boxes: green solid outline, labels in green.
+    Pred boxes: red dashed-style outline, labels in red.
+    Each pair of boxes is annotated with IoU if matched.
+    """
+    vis = image.copy()
+    draw = ImageDraw.Draw(vis)
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 14)
+        font_small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 11)
+    except (OSError, IOError):
+        font = ImageFont.load_default()
+        font_small = font
+
+    for i, box in enumerate(gt_boxes):
+        x1, y1, x2, y2 = map(int, box)
+        draw.rectangle([x1, y1, x2, y2], outline="#2ecc71", width=3)
+        label = (gt_labels[i] if gt_labels and i < len(gt_labels) else None) or f"GT{i}"
+        bbox = draw.textbbox((0, 0), label, font=font_small)
+        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        draw.rectangle([x1, y1 - th - 4, x1 + tw + 4, y1], fill="#2ecc71")
+        draw.text((x1 + 2, y1 - th - 2), label, fill="white", font=font_small)
+
+    for i, box in enumerate(pred_boxes):
+        x1, y1, x2, y2 = map(int, box)
+        for offset in range(2):
+            draw.rectangle([x1 - offset, y1 - offset, x2 + offset, y2 + offset], outline="#e74c3c", width=2)
+        label = (pred_labels[i] if pred_labels and i < len(pred_labels) else None) or f"P{i}"
+        best_iou = 0.0
+        for gt in gt_boxes:
+            iou_val = _compute_iou_flat(box, gt)
+            if iou_val > best_iou:
+                best_iou = iou_val
+        suffix = f" IoU={best_iou:.2f}" if best_iou > 0 else ""
+        full_label = f"{label}{suffix}"
+        bbox = draw.textbbox((0, 0), full_label, font=font_small)
+        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        y_pos = y2 + 2
+        draw.rectangle([x1, y_pos, x1 + tw + 4, y_pos + th + 4], fill="#e74c3c")
+        draw.text((x1 + 2, y_pos + 2), full_label, fill="white", font=font_small)
+
+    if prompt:
+        clean = prompt.replace("<|image|>\n", "").replace("<|image|>", "")
+        bbox = draw.textbbox((0, 0), clean, font=font)
+        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        draw.rectangle([0, 0, tw + 8, th + 8], fill="black")
+        draw.text((4, 4), clean, fill="white", font=font)
+
+    legend_y = vis.height - 30
+    draw.rectangle([0, legend_y, vis.width, vis.height], fill="black")
+    draw.text((4, legend_y + 6), "GT:", fill="#2ecc71", font=font_small)
+    draw.text((34, legend_y + 6), "Pred:", fill="#e74c3c", font=font_small)
+
+    if output_path:
+        vis.save(output_path)
+    return vis
+
+
+def _compute_iou_flat(box1: List[float], box2: List[float]) -> float:
+    x1 = max(box1[0], box2[0])
+    y1 = max(box1[1], box2[1])
+    x2 = min(box1[2], box2[2])
+    y2 = min(box1[3], box2[3])
+    inter = max(0, x2 - x1) * max(0, y2 - y1)
+    area1 = (box1[2] - box1[0]) * (box1[3] - box1[1])
+    area2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
+    union = area1 + area2 - inter
+    return inter / union if union > 0 else 0.0
+
+
 def _resolve_image_path(image_path: str, image_dir: str) -> Optional[str]:
     resolved = image_path if os.path.isabs(image_path) else os.path.join(image_dir, image_path)
     if not os.path.exists(resolved):
@@ -234,6 +315,7 @@ def run_benchmark(
     max_samples: Optional[int] = None,
     iou_threshold: float = 0.5,
     batch_size: int = 8,
+    save_vis_dir: Optional[str] = None,
 ) -> Dict[str, float]:
     from .config import InferenceConfig
     from .inference import DetectionInferenceEngine
@@ -241,6 +323,9 @@ def run_benchmark(
 
     inf_cfg = InferenceConfig(max_new_tokens=512)
     engine = DetectionInferenceEngine(model, tokenizer, inf_cfg)
+
+    if save_vis_dir:
+        os.makedirs(save_vis_dir, exist_ok=True)
 
     pred_boxes_by_image = {}
     gt_boxes_by_image = {}
@@ -340,6 +425,29 @@ def run_benchmark(
             elif pred_boxes and not gt_boxes:
                 all_precisions.append(0.0)
                 all_recalls.append(0.0)
+
+            if save_vis_dir:
+                gt_labeled = batch_gt_labels_boxes[j]
+                pred_labeled = parse_labels_and_boxes(result.get("text", ""))
+                orig_w, orig_h = batch_images[j].size
+                gt_scaled = [(l, [
+                    b[0] * orig_w / 1000, b[1] * orig_h / 1000,
+                    b[2] * orig_w / 1000, b[3] * orig_h / 1000,
+                ]) for l, b in gt_labeled]
+                pred_scaled = [(l, [
+                    b[0] * orig_w / 1000, b[1] * orig_h / 1000,
+                    b[2] * orig_w / 1000, b[3] * orig_h / 1000,
+                ]) for l, b in pred_labeled]
+                vis_path = os.path.join(save_vis_dir, f"{img_id:06d}.jpg")
+                visualize_eval_result(
+                    batch_images[j].copy(),
+                    [b for _, b in gt_scaled],
+                    [b for _, b in pred_scaled],
+                    gt_labels=[l for l, _ in gt_scaled],
+                    pred_labels=[l for l, _ in pred_scaled],
+                    prompt=batch_prompts[j],
+                    output_path=vis_path,
+                )
 
         iterator.set_postfix({"samples": min(end_idx, num_samples)})
 
@@ -451,6 +559,7 @@ def benchmark_on_jsonl(
     image_dir: str,
     max_samples: Optional[int] = None,
     batch_size: int = 8,
+    save_vis_dir: Optional[str] = None,
 ) -> Dict[str, float]:
     from .dataset import DetectionDataset
     ds = DetectionDataset(
@@ -458,4 +567,5 @@ def benchmark_on_jsonl(
         image_dir=image_dir,
         tokenizer=tokenizer,
     )
-    return run_benchmark(model, tokenizer, ds, image_dir, max_samples=max_samples, batch_size=batch_size)
+    return run_benchmark(model, tokenizer, ds, image_dir, max_samples=max_samples,
+                         batch_size=batch_size, save_vis_dir=save_vis_dir)

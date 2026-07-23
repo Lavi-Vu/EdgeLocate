@@ -52,6 +52,7 @@ def main():
     parser.add_argument("--iou_threshold", type=float, default=0.5, help="IoU threshold")
     parser.add_argument("--batch_size", type=int, default=8, help="Batch size for faster eval")
     parser.add_argument("--output", default=None, help="Save results JSON")
+    parser.add_argument("--save_vis_dir", default=None, help="Save eval visualizations (GT=pred boxes) to this dir")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -76,6 +77,7 @@ def main():
         image_dir=image_dir,
         max_samples=args.max_samples,
         batch_size=args.batch_size,
+        save_vis_dir=args.save_vis_dir,
     )
 
     print("\n=== Results ===")
@@ -96,6 +98,9 @@ def main():
         with open(args.output, "w") as f:
             json.dump(results, f, indent=2)
         print(f"\nResults saved to {args.output}")
+
+    if args.save_vis_dir:
+        print(f"Visualizations saved to {args.save_vis_dir}")
 
 
 if __name__ == "__main__":
