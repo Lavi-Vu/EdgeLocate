@@ -120,12 +120,12 @@ class DetectionInferenceEngine:
     ) -> List[Dict]:
         """Run batched detection inference.
 
-        All images in a call share the same prompt text (texts[0] is used).
-        Processes in mini-batches of batch_size.
+        If len(texts) == 1, the same prompt is shared across all images.
+        If len(texts) == len(images), each image gets its own prompt.
 
         Args:
             images: List of PIL Images
-            texts: List of text prompts (only first is used, shared across batch)
+            texts: List of text prompts (1 or len(images))
             batch_size: Max images per generate call
 
         Returns:
@@ -139,20 +139,7 @@ class DetectionInferenceEngine:
             transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
         ])
 
-        text = texts[0] if texts else ""
-        if SPECIAL_TOKENS["image"] not in text:
-            if "<image>" in text:
-                text = text.replace("<image>", SPECIAL_TOKENS["image"])
-            else:
-                text = f"{SPECIAL_TOKENS['image']}\n{text}"
-
-        messages = [{"role": "user", "content": text}]
-        formatted = self.tokenizer.apply_chat_template(
-            messages, tokenize=True, add_generation_prompt=True,
-            return_tensors="pt",
-        )
-        prompt_ids = formatted["input_ids"].to(self.device)
-        prompt_mask = torch.ones_like(prompt_ids)
+        shared_prompt = len(texts) == 1
 
         gen_config = GenerationConfig(
             max_new_tokens=self.config.max_new_tokens,
@@ -164,11 +151,38 @@ class DetectionInferenceEngine:
         results = []
         for i in range(0, len(images), batch_size):
             batch_imgs = images[i:i + batch_size]
+            batch_texts = texts[i:i + batch_size] if not shared_prompt else [texts[0]] * len(batch_imgs)
             batch_orig_sizes = [img.size for img in batch_imgs]
 
             pixel_values = torch.stack([transform(img) for img in batch_imgs]).to(self.device)
-            batch_ids = prompt_ids.expand(len(batch_imgs), -1).contiguous()
-            batch_mask = prompt_mask.expand(len(batch_imgs), -1).contiguous()
+
+            prompt_ids_list = []
+            for text in batch_texts:
+                if SPECIAL_TOKENS["image"] not in text:
+                    if "<image>" in text:
+                        text = text.replace("<image>", SPECIAL_TOKENS["image"])
+                    else:
+                        text = f"{SPECIAL_TOKENS['image']}\n{text}"
+                messages = [{"role": "user", "content": text}]
+                formatted = self.tokenizer.apply_chat_template(
+                    messages, tokenize=True, add_generation_prompt=True,
+                    return_tensors="pt",
+                )
+                prompt_ids_list.append(formatted["input_ids"].to(self.device))
+
+            max_len = max(ids.shape[1] for ids in prompt_ids_list)
+            padded_ids = []
+            padded_mask = []
+            for ids in prompt_ids_list:
+                pad_len = max_len - ids.shape[1]
+                if pad_len > 0:
+                    pad = torch.full((1, pad_len), self.tokenizer.pad_token_id, device=self.device, dtype=ids.dtype)
+                    ids = torch.cat([pad, ids], dim=1)
+                padded_ids.append(ids.squeeze(0))
+                padded_mask.append(torch.ones(max_len, device=self.device, dtype=torch.long))
+
+            batch_ids = torch.stack(padded_ids)
+            batch_mask = torch.stack(padded_mask)
 
             outputs = self.model.generate(
                 pixel_values=pixel_values,

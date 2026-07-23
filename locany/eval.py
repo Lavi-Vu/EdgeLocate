@@ -391,7 +391,7 @@ def run_benchmark(
             batch_prompts.append(prompt)
 
         batch_results = engine.predict_batch(
-            batch_images, [batch_prompts[0]] * len(batch_images), batch_size=len(batch_images)
+            batch_images, batch_prompts, batch_size=len(batch_images)
         )
 
         for j, result in enumerate(batch_results):
