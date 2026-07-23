@@ -9,12 +9,15 @@ Usage:
     --image_dir ./data/coco/val2017 \\
     --max_samples 200
 
-  # Quick eval on 50 samples
+  # Quick eval on 50 samples, save vis and per-image log
   python evaluate.py \\
     --model_dir ./outputs \\
     --data ./data/coco_detection/val.jsonl \\
     --image_dir ./data/coco/val2017 \\
-    --max_samples 50
+    --max_samples 50 \\
+    --save_vis_dir ./vis_output \\
+    --max_vis_images 50 \\
+    --log_json ./vis_output/results.json
 """
 
 import argparse
@@ -51,8 +54,10 @@ def main():
     parser.add_argument("--max_samples", type=int, default=None, help="Limit samples")
     parser.add_argument("--iou_threshold", type=float, default=0.5, help="IoU threshold")
     parser.add_argument("--batch_size", type=int, default=8, help="Batch size for faster eval")
-    parser.add_argument("--output", default=None, help="Save results JSON")
+    parser.add_argument("--output", default=None, help="Save aggregate results JSON")
     parser.add_argument("--save_vis_dir", default=None, help="Save eval visualizations (GT=pred boxes) to this dir")
+    parser.add_argument("--max_vis_images", type=int, default=100, help="Max images to save as vis (0=save all)")
+    parser.add_argument("--log_json", default=None, help="Save per-image log (prompt, gt, pred, iou) to JSON")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -71,6 +76,8 @@ def main():
     print(f"Max samples: {args.max_samples or 'all'}")
     print()
 
+    max_vis = args.max_vis_images if args.max_vis_images > 0 else None
+
     results = benchmark_on_jsonl(
         model, tokenizer,
         jsonl_path=args.data,
@@ -78,6 +85,8 @@ def main():
         max_samples=args.max_samples,
         batch_size=args.batch_size,
         save_vis_dir=args.save_vis_dir,
+        max_vis_images=max_vis,
+        log_json=args.log_json,
     )
 
     print("\n=== Results ===")
@@ -101,6 +110,8 @@ def main():
 
     if args.save_vis_dir:
         print(f"Visualizations saved to {args.save_vis_dir}")
+    if args.log_json:
+        print(f"Per-image log saved to {args.log_json}")
 
 
 if __name__ == "__main__":

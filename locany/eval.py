@@ -316,6 +316,8 @@ def run_benchmark(
     iou_threshold: float = 0.5,
     batch_size: int = 8,
     save_vis_dir: Optional[str] = None,
+    max_vis_images: int = 100,
+    log_json: Optional[str] = None,
 ) -> Dict[str, float]:
     from .config import InferenceConfig
     from .inference import DetectionInferenceEngine
@@ -334,6 +336,8 @@ def run_benchmark(
     all_ious = []
     all_precisions = []
     all_recalls = []
+    per_image_log = []
+    vis_count = 0
 
     from PIL import Image
 
@@ -365,6 +369,7 @@ def run_benchmark(
         batch_gt_labels_boxes = []
         batch_prompts = []
         batch_ids = []
+        batch_image_names = []
 
         for idx in batch_indices:
             raw = dataset._raw_data[idx]
@@ -373,6 +378,7 @@ def run_benchmark(
             image = Image.open(resolved).convert("RGB")
             batch_images.append(image)
             batch_ids.append(idx)
+            batch_image_names.append(os.path.basename(image_path))
 
             gt_text = _extract_gt_text(raw)
             gt_boxes = parse_boxes_from_text(gt_text or "")
@@ -392,19 +398,19 @@ def run_benchmark(
             pred_boxes = result["boxes"]
             gt_boxes = batch_gt_boxes[j]
             img_id = batch_ids[j]
+            orig_w, orig_h = batch_images[j].size
 
             pred_boxes_by_image[img_id] = pred_boxes
             gt_boxes_by_image[img_id] = gt_boxes
 
             pred_labeled = parse_labels_and_boxes(result.get("text", ""))
             pred_labels_boxes_by_image[img_id] = [(l, [
-                int(b[0] * batch_images[j].width / 1000),
-                int(b[1] * batch_images[j].height / 1000),
-                int(b[2] * batch_images[j].width / 1000),
-                int(b[3] * batch_images[j].height / 1000),
+                int(b[0] * orig_w / 1000),
+                int(b[1] * orig_h / 1000),
+                int(b[2] * orig_w / 1000),
+                int(b[3] * orig_h / 1000),
             ]) for l, b in pred_labeled]
 
-            orig_w, orig_h = batch_images[j].size
             gt_labeled_scaled = [(l, [
                 b[0] * orig_w / 1000,
                 b[1] * orig_h / 1000,
@@ -413,9 +419,11 @@ def run_benchmark(
             ]) for l, b in batch_gt_labels_boxes[j]]
             gt_labels_boxes_by_image[img_id] = gt_labeled_scaled
 
+            best_iou = 0.0
             if pred_boxes and gt_boxes:
                 box_ious = [compute_iou(p, g) for p in pred_boxes for g in gt_boxes]
-                all_ious.append(max(box_ious))
+                best_iou = max(box_ious)
+                all_ious.append(best_iou)
                 p, r, _ = compute_precision_recall(pred_boxes, gt_boxes, iou_threshold)
                 all_precisions.append(p)
                 all_recalls.append(r)
@@ -426,30 +434,39 @@ def run_benchmark(
                 all_precisions.append(0.0)
                 all_recalls.append(0.0)
 
-            if save_vis_dir:
-                gt_labeled = batch_gt_labels_boxes[j]
-                pred_labeled = parse_labels_and_boxes(result.get("text", ""))
-                orig_w, orig_h = batch_images[j].size
-                gt_scaled = [(l, [
-                    b[0] * orig_w / 1000, b[1] * orig_h / 1000,
-                    b[2] * orig_w / 1000, b[3] * orig_h / 1000,
-                ]) for l, b in gt_labeled]
-                pred_scaled = [(l, [
-                    b[0] * orig_w / 1000, b[1] * orig_h / 1000,
-                    b[2] * orig_w / 1000, b[3] * orig_h / 1000,
-                ]) for l, b in pred_labeled]
-                vis_path = os.path.join(save_vis_dir, f"{img_id:06d}.jpg")
+            entry = {
+                "image": batch_image_names[j],
+                "prompt": batch_prompts[j].replace("<|image|>\n", ""),
+                "gt_text": _extract_gt_text(dataset._raw_data[img_id]) or "",
+                "pred_text": result.get("text", ""),
+                "gt_boxes": [[int(c) for c in b] for b in gt_boxes],
+                "pred_boxes": [[int(c) for c in b] for b in pred_boxes],
+                "gt_labels_boxes": [[l, [int(c) for c in b]] for l, b in gt_labeled_scaled],
+                "pred_labels_boxes": [[l, [int(c) for c in b]] for l, b in pred_labels_boxes_by_image[img_id]],
+                "best_iou": best_iou,
+            }
+            per_image_log.append(entry)
+
+            if save_vis_dir and vis_count < max_vis_images:
+                vis_name = os.path.splitext(batch_image_names[j])[0] + ".jpg"
+                vis_path = os.path.join(save_vis_dir, vis_name)
                 visualize_eval_result(
                     batch_images[j].copy(),
-                    [b for _, b in gt_scaled],
-                    [b for _, b in pred_scaled],
-                    gt_labels=[l for l, _ in gt_scaled],
-                    pred_labels=[l for l, _ in pred_scaled],
+                    [b for _, b in gt_labeled_scaled],
+                    [b for _, b in pred_labels_boxes_by_image[img_id]],
+                    gt_labels=[l for l, _ in gt_labeled_scaled],
+                    pred_labels=[l for l, _ in pred_labels_boxes_by_image[img_id]],
                     prompt=batch_prompts[j],
                     output_path=vis_path,
                 )
+                vis_count += 1
 
         iterator.set_postfix({"samples": min(end_idx, num_samples)})
+
+    if log_json:
+        os.makedirs(os.path.dirname(log_json) or ".", exist_ok=True)
+        with open(log_json, "w") as f:
+            json.dump(per_image_log, f, indent=2)
 
     results = {
         "num_samples": len(all_precisions),
@@ -560,6 +577,8 @@ def benchmark_on_jsonl(
     max_samples: Optional[int] = None,
     batch_size: int = 8,
     save_vis_dir: Optional[str] = None,
+    max_vis_images: int = 100,
+    log_json: Optional[str] = None,
 ) -> Dict[str, float]:
     from .dataset import DetectionDataset
     ds = DetectionDataset(
@@ -568,4 +587,5 @@ def benchmark_on_jsonl(
         tokenizer=tokenizer,
     )
     return run_benchmark(model, tokenizer, ds, image_dir, max_samples=max_samples,
-                         batch_size=batch_size, save_vis_dir=save_vis_dir)
+                         batch_size=batch_size, save_vis_dir=save_vis_dir,
+                         max_vis_images=max_vis_images, log_json=log_json)
