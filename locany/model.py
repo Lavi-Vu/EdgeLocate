@@ -377,56 +377,188 @@ class LocateAnythingForDetection(PreTrainedModel):
         input_ids: Optional[torch.LongTensor] = None,
         attention_mask: Optional[torch.BoolTensor] = None,
         labels: Optional[torch.LongTensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         **kwargs,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
+        """Forward pass that bypasses PEFT/CausalLM wrappers for gradient flow.
+
+        Reference (Eagle/Embodied) calls the inner transformer model directly and
+        computes cross-entropy loss manually. This avoids gradient flow issues when
+        PEFT's CausalLM wrapper receives inputs_embeds.
+
+        Unlike the reference (which replaces image tokens IN-PLACE at constant seq
+        length), EdgeLocate expands 1 <|image|> token to N visual tokens, growing
+        the sequence. We handle this expansion here with proper label/mask/position
+        expansion.
+        """
         return_dict = return_dict if return_dict is not None else True
         output_hidden_states = output_hidden_states if output_hidden_states is not None else False
+        IGNORE_INDEX = -100
 
+        has_images = (pixel_values is not None and input_ids is not None
+                      and self.image_token_id is not None)
+        B, orig_len = input_ids.shape
+
+        # --- Extract and project visual features ---
         num_visual_tokens = 0
-        if pixel_values is not None and input_ids is not None and self.image_token_id is not None:
-            merged_embeds, merged_mask, merged_ids = self.merge_visual_features(
-                pixel_values, input_ids, attention_mask,
-            )
-            if merged_embeds is not None:
-                num_visual_tokens = merged_embeds.shape[1] - (input_ids.shape[1] - 1)
-            if merged_embeds is None:
-                merged_embeds = None
-                merged_mask = attention_mask
-                merged_ids = input_ids
-        else:
-            merged_embeds = None
-            merged_mask = attention_mask
-            merged_ids = input_ids
+        vis_feats = None
+        if has_images:
+            vis_feats = self.vision_encoder(pixel_values)
+            vis_feats = self.projector(vis_feats)
+            num_visual_tokens = vis_feats.shape[1]
 
-        if labels is not None and pixel_values is not None and self.image_token_id is not None and (input_ids == self.image_token_id).any():
-            expanded_labels = self._expand_labels_for_visual(labels, input_ids, num_visual_tokens)
+        # --- Build expanded input_embeds, labels, attention_mask ---
+        if has_images and num_visual_tokens > 0:
+            input_embeds, attention_mask, expanded_labels = self._expand_sequence(
+                input_ids, attention_mask, labels, vis_feats, num_visual_tokens,
+            )
         else:
+            input_embeds = self.llm.get_input_embeddings()(input_ids)
             expanded_labels = labels
 
-        llm_kwargs = dict(
-            attention_mask=merged_mask,
-            labels=expanded_labels,
+        # --- Build position ids ---
+        max_len = input_embeds.shape[1]
+        if position_ids is None:
+            position_ids = torch.arange(max_len, device=input_ids.device).unsqueeze(0).expand(B, -1)
+
+        # --- Call inner transformer directly (bypass PEFT + CausalLM wrappers) ---
+        if hasattr(self.llm, 'base_model') and hasattr(self.llm.base_model, 'model'):
+            inner_model = self.llm.base_model.model.model  # Qwen2Model
+        else:
+            inner_model = self.llm.model  # Qwen2Model
+
+        outputs = inner_model(
+            inputs_embeds=input_embeds,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
             output_hidden_states=output_hidden_states,
             return_dict=True,
         )
-        if merged_embeds is not None:
-            llm_kwargs["inputs_embeds"] = merged_embeds
-        else:
-            llm_kwargs["input_ids"] = merged_ids
 
-        outputs = self.llm(**llm_kwargs, **kwargs)
+        hidden_states = outputs.last_hidden_state
+
+        # --- Compute loss manually via lm_head projection ---
+        if expanded_labels is not None:
+            if hasattr(self.llm, 'base_model') and hasattr(self.llm.base_model, 'model'):
+                lm_head = self.llm.base_model.model.lm_head
+            else:
+                lm_head = self.llm.lm_head
+
+            shift_hidden = hidden_states[..., :-1, :].contiguous()
+            shift_labels = expanded_labels[..., 1:].contiguous()
+            shift_hidden = shift_hidden.view(-1, shift_hidden.shape[-1])
+            shift_labels = shift_labels.view(-1)
+
+            loss = torch.nn.functional.cross_entropy(
+                lm_head(shift_hidden), shift_labels,
+                ignore_index=IGNORE_INDEX, reduction='mean',
+            )
+        else:
+            loss = None
 
         if not return_dict:
-            return outputs
+            return (loss,) if loss is not None else (hidden_states,)
+
         return CausalLMOutputWithPast(
-            loss=outputs.loss,
-            logits=outputs.logits,
+            loss=loss,
+            logits=None,
             past_key_values=outputs.past_key_values,
-            hidden_states=outputs.hidden_states,
-            attentions=outputs.attentions,
+            hidden_states=outputs.hidden_states if output_hidden_states else None,
+            attentions=outputs.attentions if hasattr(outputs, 'attentions') else None,
         )
+
+    def _expand_sequence(
+        self,
+        input_ids: torch.LongTensor,
+        attention_mask: torch.BoolTensor,
+        labels: torch.LongTensor,
+        vis_feats: torch.Tensor,
+        num_visual_tokens: int,
+    ) -> Tuple[torch.Tensor, torch.BoolTensor, torch.LongTensor]:
+        """Expand single <|image|> token into N visual tokens per sample.
+
+        For each sample in the batch, finds the <|image|> position, replaces it
+        with the projected visual features (N tokens), and pads all samples to
+        the same length. Labels at visual token positions are set to -100.
+        """
+        IGNORE_INDEX = -100
+        B, orig_len, C = input_ids.shape
+        text_embeds = self.llm.get_input_embeddings()(input_ids)
+
+        new_embeds_list = []
+        new_mask_list = []
+        new_labels_list = []
+
+        for b in range(B):
+            ids_b = input_ids[b]
+            mask_b = attention_mask[b]
+            labels_b = labels[b] if labels is not None else None
+
+            img_pos = (ids_b == self.image_token_id).nonzero(as_tuple=False)
+            if img_pos.numel() == 0:
+                new_embeds_list.append(text_embeds[b])
+                new_mask_list.append(mask_b)
+                if labels_b is not None:
+                    new_labels_list.append(labels_b)
+                continue
+
+            img_pos_idx = img_pos[0].item()
+            before = text_embeds[b, :img_pos_idx]
+            after = text_embeds[b, img_pos_idx + 1:]
+            new_embeds_list.append(torch.cat([before, vis_feats[b], after], dim=0))
+
+            before_mask = mask_b[:img_pos_idx]
+            vis_mask = torch.ones(num_visual_tokens, device=mask_b.device, dtype=mask_b.dtype)
+            after_mask = mask_b[img_pos_idx + 1:]
+            new_mask_list.append(torch.cat([before_mask, vis_mask, after_mask], dim=0))
+
+            if labels_b is not None:
+                before_lbl = labels_b[:img_pos_idx]
+                vis_lbl = torch.full((num_visual_tokens,), IGNORE_INDEX,
+                                     device=labels_b.device, dtype=labels_b.dtype)
+                after_lbl = labels_b[img_pos_idx + 1:]
+                new_labels_list.append(torch.cat([before_lbl, vis_lbl, after_lbl], dim=0))
+
+        max_len = max(e.shape[0] for e in new_embeds_list)
+
+        padded_embeds = []
+        padded_mask = []
+        padded_labels = []
+
+        for i in range(len(new_embeds_list)):
+            emb = new_embeds_list[i]
+            pad_len = max_len - emb.shape[0]
+            if pad_len > 0:
+                padded_embeds.append(torch.cat([
+                    emb, torch.zeros(pad_len, C, device=emb.device, dtype=emb.dtype)
+                ], dim=0))
+            else:
+                padded_embeds.append(emb)
+
+            m = new_mask_list[i]
+            if pad_len > 0:
+                padded_mask.append(torch.cat([
+                    m, torch.zeros(pad_len, device=m.device, dtype=m.dtype)
+                ], dim=0))
+            else:
+                padded_mask.append(m)
+
+            if i < len(new_labels_list):
+                l = new_labels_list[i]
+                if pad_len > 0:
+                    padded_labels.append(torch.cat([
+                        l, torch.full((pad_len,), IGNORE_INDEX, device=l.device, dtype=l.dtype)
+                    ], dim=0))
+                else:
+                    padded_labels.append(l)
+
+        input_embeds = torch.stack(padded_embeds)
+        attention_mask = torch.stack(padded_mask)
+        labels_out = torch.stack(padded_labels) if padded_labels else labels
+
+        return input_embeds, attention_mask, labels_out
 
     @torch.no_grad()
     def generate(
@@ -477,6 +609,14 @@ class LocateAnythingForDetection(PreTrainedModel):
             if p.requires_grad:
                 params[name] = p
         return params
+
+    def check_gradient_flow(self) -> Dict[str, bool]:
+        """Check that gradients flow through projector and inner model after backward."""
+        result = {}
+        for name, p in self.named_parameters():
+            if p.requires_grad:
+                result[name] = p.grad is not None and p.grad.abs().sum().item() > 0
+        return result
 
 
 def create_model(config: ModelConfig) -> LocateAnythingForDetection:

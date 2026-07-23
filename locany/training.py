@@ -14,6 +14,27 @@ from .utils import logger, set_seed
 class _DetectionTrainer(Trainer):
     """Custom Trainer that saves LoRA adapter and non-llm weights with every checkpoint."""
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._grad_check_done = False
+
+    def training_step(self, model, inputs, num_items_in_batch=None):
+        loss = super().training_step(model, inputs, num_items_in_batch)
+
+        # Log gradient flow diagnostics on first few steps
+        if not self._grad_check_done and self.state.global_step <= 3:
+            grad_info = model.check_gradient_flow()
+            has_grad = {k: v for k, v in grad_info.items() if v}
+            no_grad = {k: v for k, v in grad_info.items() if not v}
+            logger.info(f"[GradDiag] step={self.state.global_step}: "
+                        f"{len(has_grad)} params with grad, {len(no_grad)} params without grad")
+            for name in list(no_grad.keys())[:5]:
+                logger.info(f"  NO GRAD: {name}")
+            if self.state.global_step >= 3:
+                self._grad_check_done = True
+
+        return loss
+
     def _save(self, output_dir: Optional[str] = None, state_dict=None):
         super()._save(output_dir, state_dict)
         if output_dir is None:
@@ -55,9 +76,18 @@ def setup_training(
     set_seed(train_cfg.seed)
 
     if train_cfg.gradient_checkpointing:
-        if hasattr(model.llm, "gradient_checkpointing_enable"):
+        # Enable gradient checkpointing on the inner transformer (not PEFT wrapper)
+        # Our forward() calls inner_model directly, so checkpointing must be on the transformer
+        if hasattr(model.llm, 'base_model') and hasattr(model.llm.base_model, 'model'):
+            inner_model = model.llm.base_model.model.model
+        else:
+            inner_model = model.llm.model
+        if hasattr(inner_model, "gradient_checkpointing_enable"):
+            inner_model.gradient_checkpointing_enable()
+            logger.info("Gradient checkpointing enabled on inner transformer")
+        elif hasattr(model.llm, "gradient_checkpointing_enable"):
             model.llm.gradient_checkpointing_enable()
-            logger.info("Gradient checkpointing enabled on LLM")
+            logger.info("Gradient checkpointing enabled on LLM (fallback)")
 
     deepspeed_config = train_cfg.deepspeed
     if deepspeed_config and not os.path.exists(deepspeed_config):
@@ -80,6 +110,7 @@ def setup_training(
         bf16=train_cfg.bf16,
         fp16=train_cfg.fp16 if not train_cfg.bf16 else False,
         gradient_checkpointing=False,
+        gradient_checkpointing_kwargs={"use_reentrant": False} if train_cfg.gradient_checkpointing else None,
         deepspeed=deepspeed_config,
         logging_steps=train_cfg.logging_steps,
         save_steps=train_cfg.save_steps,
